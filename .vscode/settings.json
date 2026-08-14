@@ -1,0 +1,17 @@
+{
+    "python.defaultInterpreterPath": "/home/dmz-ai/miniconda3/envs/mpm/bin/python",
+    "python.terminal.activateEnvironment": true,
+    "python.terminal.activateEnvInCurrentTerminal": true,
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    "python.testing.pytestEnabled": true,
+    "python.testing.pytestPath": "/home/dmz-ai/miniconda3/envs/mpm/bin/pytest",
+    "python.testing.cwd": "${workspaceFolder}",
+    "python.testing.pytestArgs": [
+        "-q"
+    ],
+    "files.exclude": {
+        "**/__pycache__": true,
+        "**/.pytest_cache": true
+    }
+}

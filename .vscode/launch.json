@@ -1,0 +1,75 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "MPM: Run run.py (带配置)",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/home/dmz-ai/miniconda3/envs/mpm/bin/python",
+            "program": "${workspaceFolder}/run.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--config",
+                "${input:configFile}"
+            ],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "justMyCode": false
+        },
+        {
+            "name": "MPM: Validate Only (快速验证)",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/home/dmz-ai/miniconda3/envs/mpm/bin/python",
+            "program": "${workspaceFolder}/run.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--config",
+                "${input:configFile}",
+                "--validate-only"
+            ],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "justMyCode": false
+        },
+        {
+            "name": "MPM: Debug Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/home/dmz-ai/miniconda3/envs/mpm/bin/python",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "justMyCode": false
+        },
+        {
+            "name": "MPM: Run Pytest",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/home/dmz-ai/miniconda3/envs/mpm/bin/python",
+            "module": "pytest",
+            "console": "integratedTerminal",
+            "args": ["-q"],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "justMyCode": false
+        }
+    ],
+    "inputs": [
+        {
+            "id": "configFile",
+            "type": "promptString",
+            "description": "请输入 YAML 配置文件名（相对于 MPM_codex_phase2 目录）",
+            "default": "configs/experiments/lachlan_rf_phase2.yaml"
+        }
+    ]
+}

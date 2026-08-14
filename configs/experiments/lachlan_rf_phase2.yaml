@@ -1,0 +1,186 @@
+experiment:
+  name: lachlan_rf_phase2_test
+  seed: 2026
+  output_dir: outputs/lachlan_rf_phase2_test
+  execution_mode: archive_replay
+  variant: baseline
+task:
+  name: target_area_prediction
+  region: lachlan
+  params: {}
+dataset:
+  root: ../EarthByte-MPM_Lachlan_Porphyry
+  archive_dir: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Outputs_Cu_Lachlan_v1.6
+  occurrence: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Mineral Occurrences/MinView/GSNSWDataset/porphyry.shp
+  boundary: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Frames/Lachlan_Boundary_edited.shp
+  training_boundary: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Frames/NSW_Boundary/NSW_STATE_POLYGON_shp_GDA94_NoIsland_ACT.shp
+  geology:
+    line_files:
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/IntrusionsBndys_FaultedBndys.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/IntrusionsBndys_GeologicalBndys.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/IntrusionsBndys_IntrusiveBndys.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/IntrusionsBndys_UnconformableBndys.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/MetamorphicBoundaries_Faults.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/MetamorphicBoundaries_GeologicalBndys.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/MetamorphicBoundaries_MetamorphicBndys.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/MetamorphicBoundaries_Unconformities.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/RockUnitBndyFaults_LAO_Faulted
+      boundary.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/RockUnitBndyFaults_LAO_Geological
+      boundary.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/RockUnitBndyFaults_LAO_Intrusive
+      boundary.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/RockUnitBndyFaults_LAO_Unconformable
+      boundary.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/MetamorphicIsograds.shp
+    metamorphic_facies:
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polygons/MetamorphicFacies_Benambran.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polygons/MetamorphicFacies_KanimblanTablelands.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polygons/MetamorphicFacies_Tabberabberan.shp
+    intrusions: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polygons/Intrusions_Tabberabberan.shp
+    rock_units: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polygons/RockUnits_LAO.shp
+  magnetic: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Magnetic
+  gravity: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Gravity
+  radiometric: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Radiometric
+  remote_sensing: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Remote Sensing
+  elevation: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Elevation/Gravmap2019-grid-dem_geoid.tif
+  seismic: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Seismic/vs_cluster_boundaries.shp
+research_unit:
+  type: point_local_environment
+  train_positive: occurrence_points
+  train_unlabeled: random_points_in_nsw_boundary
+  prediction_grid_size: 0.05
+label:
+  strategy: positive_unlabeled_as_zero
+  positive_value: 1
+  unlabeled_value: 0
+  sample_weight:
+    VLG: 0.8
+    LGE: 0.4
+    MED: 0.3
+    SML: 0.2
+    OCC: 0.1
+    unlabeled: 0.5
+features:
+  operators:
+  - name: raster_statistics
+    params:
+      buffer_size: 10
+      buffer_shape: square
+  - name: texture
+    params:
+      buffer_size: 10
+  - name: elevation_gradient
+    params:
+      buffer_size: 10
+      buffer_shape: square
+  - name: line_distance
+    params:
+      distance_type: geodesic
+  - name: categorical_geology
+    params: {}
+preprocess:
+  correlation_threshold: 0.7
+  categorical_encoding: onehot_ignore_unknown
+  scaling: standard
+model:
+  name: rf
+  params:
+    n_jobs: -1
+    random_state: 42
+validation:
+  holdout:
+    name: random_holdout
+    params:
+      test_size: 0.25
+  cross_validation:
+    name: stratified_kfold
+    params:
+      n_splits: 10
+      shuffle: false
+  metrics:
+  - accuracy
+  - precision
+  - recall
+  - f1
+  - confusion_matrix
+  - roc_auc
+  primary_metric: f1
+prediction:
+  score_type: probability
+  normalization: minmax
+  export_geotiff: true
+label_refinement:
+  enabled: true
+  name: pub
+  params:
+    n_iter: 100
+    n_jobs: -1
+    search_space:
+      bootstrap:
+        type: categorical
+        values:
+        - true
+        - false
+      max_depth:
+        type: integer
+        low: 5
+        high: 20
+      max_features:
+        type: categorical
+        values:
+        - null
+        - sqrt
+        - log2
+      min_samples_leaf:
+        type: integer
+        low: 2
+        high: 20
+      min_samples_split:
+        type: integer
+        low: 2
+        high: 30
+      n_estimators:
+        type: integer
+        low: 10
+        high: 200
+knowledge:
+  enabled: false
+  items: []
+predicates:
+  enabled: false
+  combine: sequential
+  items: []
+tuning:
+  name: bayes
+  params:
+    n_iter: 1000
+    n_jobs: -1
+    search_space:
+      bootstrap:
+        type: categorical
+        values:
+        - true
+        - false
+      max_depth:
+        type: integer
+        low: 5
+        high: 20
+      max_features:
+        type: categorical
+        values:
+        - null
+        - sqrt
+        - log2
+      min_samples_leaf:
+        type: integer
+        low: 2
+        high: 20
+      min_samples_split:
+        type: integer
+        low: 2
+        high: 30
+      n_estimators:
+        type: integer
+        low: 10
+        high: 200

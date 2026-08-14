@@ -1,0 +1,190 @@
+"""二维靶区预测 Task。"""
+
+from __future__ import annotations
+
+import warnings
+from pathlib import Path
+from typing import Any, Mapping
+
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import MinMaxScaler
+
+from ..data.research_units import build_positive_units, build_prediction_grid, sample_unlabeled_units
+from .registry import TASK_REGISTRY
+
+
+class TaskCapabilityError(NotImplementedError):
+    """Task 缺少某项操作所需的数据或实现时抛出的异常。"""
+
+
+@TASK_REGISTRY.decorator("target_area_prediction")
+class TargetAreaPredictionTask:
+    """负责二维靶区找矿预测的研究单元与预测语义。"""
+
+    def __init__(self, task_config: Mapping[str, Any], prediction_config: Mapping[str, Any]):
+        self.task_config = dict(task_config)
+        self.prediction_config = dict(prediction_config)
+
+    @staticmethod
+    def validate_config(
+        task_config,
+        research_unit_config,
+        prediction_config,
+        dataset_config,
+        execution_mode,
+    ) -> None:
+        if research_unit_config["type"] != "point_local_environment":
+            raise ValueError(
+                "target_area_prediction currently requires research_unit.type=point_local_environment"
+            )
+        if prediction_config["score_type"] != "probability":
+            raise ValueError("target_area_prediction currently supports only probability scores")
+        if prediction_config["normalization"] not in {"minmax", "none", None}:
+            raise ValueError("target_area_prediction normalization must be minmax or none")
+        if float(research_unit_config["prediction_grid_size"]) <= 0:
+            raise ValueError("target_area_prediction prediction_grid_size must be positive")
+        if execution_mode == "raw_gis":
+            required = {
+                "occurrence",
+                "boundary",
+                "training_boundary",
+                "geology",
+                "magnetic",
+                "gravity",
+                "radiometric",
+                "remote_sensing",
+                "elevation",
+                "seismic",
+            }
+            missing = sorted(required.difference(dataset_config))
+            if missing:
+                raise ValueError(f"target_area_prediction raw_gis dataset is missing: {missing}")
+            geology_required = {"line_files", "metamorphic_facies", "intrusions", "rock_units"}
+            geology_missing = sorted(geology_required.difference(dataset_config["geology"]))
+            if geology_missing:
+                raise ValueError(
+                    f"target_area_prediction raw_gis geology is missing: {geology_missing}"
+                )
+
+    def build_positive_units(self, dataset_config, research_unit_config, label_config) -> pd.DataFrame:
+        return build_positive_units(dataset_config["occurrence"], label_config)
+
+    def build_unlabeled_units(
+        self, dataset_config, research_unit_config, label_config, count: int
+    ) -> pd.DataFrame:
+        return sample_unlabeled_units(dataset_config["training_boundary"], count, label_config)
+
+    def build_prediction_units(self, dataset_config, research_unit_config):
+        units, mask = build_prediction_grid(
+            dataset_config["boundary"], float(research_unit_config["prediction_grid_size"])
+        )
+        return units, pd.DataFrame(mask)
+
+    @staticmethod
+    def prepare_prediction_data(
+        target_data: pd.DataFrame, target_mask: pd.DataFrame
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """移除无效目标特征，并清除其对应的二维掩膜单元。"""
+        valid_target_rows = ~target_data.isna().any(axis=1)
+        target = target_data.loc[valid_target_rows].reset_index(drop=True)
+        aligned_mask = target_mask.copy()
+        inside_flags = (
+            aligned_mask.iloc[:, 2]
+            .astype(str)
+            .str.lower()
+            .isin({"1", "true", "1.0"})
+            .to_numpy()
+        )
+        inside_indices = np.flatnonzero(inside_flags)
+        if len(inside_indices) != len(valid_target_rows):
+            raise ValueError("Raw target grid and target mask no longer align")
+        invalid_inside = inside_indices[~valid_target_rows.to_numpy()]
+        if len(invalid_inside):
+            aligned_mask.iloc[invalid_inside, 2] = False
+        return target, target[["X", "Y"]].reset_index(drop=True), aligned_mask
+
+    def predict(self, model: Any, target_features: pd.DataFrame, target_coords: pd.DataFrame) -> pd.DataFrame:
+        """返回有效目标单元的坐标与正类得分。"""
+        if self.prediction_config["score_type"] != "probability":
+            raise ValueError("Only probability target scoring is supported by target_area_prediction")
+        probabilities = model.predict_proba(target_features)[:, 1]
+        if self.prediction_config["normalization"] == "minmax":
+            warnings.warn(
+                "Baseline compatibility: applying MinMaxScaler.fit_transform over the target area; scores are not calibrated probabilities.",
+                UserWarning,
+                stacklevel=2,
+            )
+            probabilities = MinMaxScaler().fit_transform(probabilities.reshape(-1, 1)).ravel()
+        elif self.prediction_config["normalization"] not in {None, "none"}:
+            raise ValueError(
+                f"Unsupported target score normalization: {self.prediction_config['normalization']}"
+            )
+        return pd.DataFrame({"X": target_coords["X"], "Y": target_coords["Y"], "prob": probabilities})
+
+    @staticmethod
+    def reconstruct_grid(probabilities: pd.DataFrame, target_mask: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        flags = target_mask.iloc[:, 2].astype(str).str.lower().isin({"1", "true", "1.0"}).to_numpy()
+        if int(flags.sum()) != len(probabilities):
+            raise ValueError(
+                "target_mask true-cell count does not match target probability rows; cannot reconstruct GeoTIFF"
+            )
+        values = np.full(len(target_mask), np.nan, dtype=np.float32)
+        values[flags] = probabilities["prob"].to_numpy(dtype=np.float32)
+        x_values = np.unique(target_mask.iloc[:, 0].to_numpy(dtype=float))
+        y_values = np.unique(target_mask.iloc[:, 1].to_numpy(dtype=float))
+        return values.reshape((len(y_values), len(x_values))), x_values, y_values
+
+    def export_geotiff(self, probabilities: pd.DataFrame, target_mask: pd.DataFrame, path: Path) -> Path | None:
+        if not self.prediction_config["export_geotiff"]:
+            return None
+        try:
+            from osgeo import gdal, osr
+        except ImportError as error:  # pragma: no cover
+            raise TaskCapabilityError("GeoTIFF export requires GDAL Python bindings") from error
+        grid, x_values, y_values = self.reconstruct_grid(probabilities, target_mask)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        step_x = float(np.diff(x_values).min())
+        step_y = float(np.diff(y_values).min())
+        dataset = gdal.GetDriverByName("GTiff").Create(
+            str(path), len(x_values), len(y_values), 1, gdal.GDT_Float32
+        )
+        dataset.SetGeoTransform((float(x_values.min()), step_x, 0, float(y_values.max()), 0, -step_y))
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(4283)
+        dataset.SetProjection(srs.ExportToWkt())
+        dataset.GetRasterBand(1).WriteArray(np.flipud(grid))
+        dataset.FlushCache()
+        dataset = None
+        return path
+
+    def export_predictions(
+        self, predictions: pd.DataFrame, target_mask: pd.DataFrame, output_dir: Path
+    ) -> list[Path]:
+        """持久化靶区表格评分，以及可选的概率 GeoTIFF。"""
+        output_dir.mkdir(parents=True, exist_ok=True)
+        csv_path = output_dir / "target_probs.csv"
+        predictions.to_csv(csv_path, index=False)
+        paths = [csv_path]
+        geotiff_path = self.export_geotiff(
+            predictions, target_mask, output_dir / "probability_map.tif"
+        )
+        if geotiff_path is not None:
+            paths.append(geotiff_path)
+        return paths
+
+    @staticmethod
+    def archived_prediction_artifacts(archive_dir: Path) -> dict[str, Path]:
+        return {
+            "target_probs.csv": archive_dir / "target_probs.csv",
+            "probability_map.tif": archive_dir / "probability_map.tif",
+        }
+
+
+# 供一期调用方使用的向后兼容导入。
+def create_task(name: str, config: Mapping[str, Any]) -> TargetAreaPredictionTask:
+    from ..core.bootstrap import load_builtin_components
+    from .registry import create_task as create_registered_task
+
+    load_builtin_components()
+    return create_registered_task(name, {}, config)

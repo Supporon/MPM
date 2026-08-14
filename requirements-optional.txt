@@ -1,0 +1,8 @@
+# 可选能力；仅在使用相应实验路径时安装。
+scikit-optimize   # 用于 tuning.name=bayes
+pulearn            # 用于 label_refinement.name=pub
+geopandas          # 用于构建 raw_gis 研究单元
+shapely            # 用于 raw_gis 几何运算
+rasterio            # 供旧版 lib_mpm.py 提取 raw_gis 栅格特征
+scikit-image        # 供旧版 lib_mpm.py 提取 raw_gis 纹理特征
+# prediction.export_geotiff=true 时需要 GDAL Python 绑定（osgeo）。
