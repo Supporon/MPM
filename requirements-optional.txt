@@ -5,4 +5,5 @@ geopandas          # 用于构建 raw_gis 研究单元
 shapely            # 用于 raw_gis 几何运算
 rasterio            # 供旧版 lib_mpm.py 提取 raw_gis 栅格特征
 scikit-image        # 供旧版 lib_mpm.py 提取 raw_gis 纹理特征
+torch               # 用于 model.name=cnn
 # prediction.export_geotiff=true 时需要 GDAL Python 绑定（osgeo）。

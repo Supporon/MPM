@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import pickle
 import shutil
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
+from ..utils.logging import get_logger, setup_logging
 from ..data.dataset import ArchiveDataset, DatasetRepository
 from ..features.preprocess import BaselinePreprocessor
 from ..knowledge.pipeline import KnowledgePipeline
@@ -35,6 +38,10 @@ class Experiment:
         self.values = config.values
         self.spec = config.spec
         self.output_dir = config.output_dir
+        # 追加时间戳后缀，防止重复运行同一配置时覆盖前次结果
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.output_dir = self.output_dir.parent / f"{self.output_dir.name}_{timestamp}"
+        self.values["experiment"]["output_dir"] = str(self.output_dir)
         self.dataset: ArchiveDataset | None = None
         self.preprocessor: BaselinePreprocessor | None = None
         self.model: Any | None = None
@@ -46,6 +53,12 @@ class Experiment:
         self.knowledge_pipeline = KnowledgePipeline(self.spec.knowledge)
         self.predicate_pipeline = PredicatePipeline(self.spec.predicates)
         self._prepare_output_layout()
+        self._log = setup_logging(self.output_dir)
+        self._log.info(
+            "Experiment '%s' initialized (mode=%s, task=%s, model=%s, tuner=%s)",
+            self.spec.name, self.mode, self.spec.task.name,
+            self.spec.model.name, self.spec.tuner.name,
+        )
 
     @property
     def mode(self) -> str:
@@ -67,7 +80,15 @@ class Experiment:
     def prepare_data(self) -> None:
         """加载归档数据表，或委托所选 Task 构建原始研究单元。"""
         if self.mode in {"archive_replay", "train_from_archive_features"}:
+            self._log.info("Loading archive dataset from %s", self.values["dataset"]["archive_dir"])
             self.dataset = DatasetRepository(self.values["dataset"]).load_archive()
+            summary = self.dataset.summary()
+            self._log.info(
+                "Archive loaded: %d features, train=%d rows, test=%d rows",
+                summary["feature_count"],
+                summary["xy_rf_train_shape"][0],
+                summary["xy_rf_test_shape"][0],
+            )
             return
         if self.mode != "raw_gis":
             raise ValueError(f"Unknown execution mode: {self.mode}")
@@ -84,9 +105,11 @@ class Experiment:
         """快照归档特征，或运行已配置的 Feature Operator 管线。"""
         if self.mode in {"archive_replay", "train_from_archive_features"}:
             assert self.dataset is not None
+            self._log.info("Snapshotting archive features to %s/intermediate", self.output_dir)
             self.output_files.extend(DatasetRepository.snapshot(self.dataset, self.output_dir))
             return
 
+        self._log.info("Running feature operators: %s", [op.name for op in self.spec.feature_operators])
         pipeline = FeaturePipeline(self.values["dataset"], self.spec.feature_operators)
         deposits = pipeline.extract(self._raw_positive_units).dropna().reset_index(drop=True)
         unlabelled_units = self.task.build_unlabeled_units(
@@ -111,6 +134,7 @@ class Experiment:
         """校验归档 schema，或应用保留的基线预处理契约。"""
         if self.mode in {"archive_replay", "train_from_archive_features"}:
             assert self.dataset is not None
+            self._log.info("Validating archive schema")
             self.dataset.validate_schema()
             return
 
@@ -191,6 +215,7 @@ class Experiment:
             shutil.copy2(source, target)
             self.output_files.append(target)
             self.component_metadata["model_artifact"] = "replayed_from_archive"
+            self._log.info("Model replayed from archive: %s", source)
             return
 
         if self.mode == "train_from_archive_features":
@@ -204,6 +229,12 @@ class Experiment:
             self.component_metadata["holdout_execution"] = "precomputed_in_archive"
             if self.spec.label_refinement is not None:
                 self.component_metadata["label_refinement_execution"] = "precomputed_in_archive"
+            self._log.info(
+                "Training data: %d rows, class distribution: pos=%d neg=%d",
+                len(training.labels),
+                int((training.labels == 1).sum()),
+                int((training.labels == 0).sum()),
+            )
         else:
             training = self._training_from_frame(
                 self._raw_prepared.xy_train,
@@ -227,6 +258,11 @@ class Experiment:
                 f"{sorted(training.constraints)}"
             )
         tuner = TUNER_REGISTRY.create(self.spec.tuner.name)
+        self._log.info(
+            "Training model '%s' with tuner '%s' (primary_metric=%s)",
+            self.spec.model.name, self.spec.tuner.name, self.spec.primary_metric,
+        )
+        t_start = time.monotonic()
         self.model = tuner.fit(
             self.model_adapter,
             training,
@@ -239,6 +275,8 @@ class Experiment:
             self.spec.primary_metric,
             self.spec.seed,
         )
+        elapsed = time.monotonic() - t_start
+        self._log.info("Training completed in %.1fs", elapsed)
         self.component_metadata["model"] = self.spec.model.name
         self.component_metadata["tuner"] = self.spec.tuner.name
         if getattr(tuner, "uses_cross_validation", False):
@@ -253,6 +291,7 @@ class Experiment:
         """持久化已配置的指标，或记录归档回放元数据。"""
         if self.mode == "archive_replay":
             assert self.dataset is not None
+            self._log.info("Recording archive replay metadata (metrics not recomputed)")
             reference_path = self.dataset.archive_dir / "model_comparison" / "model_comparison_results.csv"
             archived_reference = None
             if reference_path.is_file():
@@ -284,6 +323,7 @@ class Experiment:
             if self.model is None:
                 raise RuntimeError("Model must be trained before evaluation")
             evaluation = self._evaluation_data
+            self._log.info("Evaluating model on %d test samples", len(evaluation.labels))
             self.metrics = evaluate_classifier(
                 self.model,
                 evaluation.features,
@@ -293,6 +333,8 @@ class Experiment:
             )
             self.metrics["mode"] = self.mode
             self.metrics["primary_metric"] = self.spec.primary_metric
+            primary_val = self.metrics.get(self.spec.primary_metric)
+            self._log.info("Evaluation complete: %s=%.4f", self.spec.primary_metric, primary_val)
 
         path = self.output_dir / "metrics.json"
         write_json(path, self.metrics)
@@ -303,6 +345,7 @@ class Experiment:
         prediction_dir = self.output_dir / "predictions"
         if self.mode == "archive_replay":
             assert self.dataset is not None
+            self._log.info("Replaying archived predictions")
             for filename, source in self.task.archived_prediction_artifacts(
                 self.dataset.archive_dir
             ).items():
@@ -326,10 +369,12 @@ class Experiment:
             target_coords = self._raw_target_coords
             target_mask = self._raw_target_mask
 
+        self._log.info("Generating predictions for %d target points", len(target_features))
         predictions = self.task.predict(self.model, target_features, target_coords)
         self.output_files.extend(
             self.task.export_predictions(predictions, target_mask, prediction_dir)
         )
+        self._log.info("Predictions exported to %s", prediction_dir)
 
     def export(self) -> dict[str, Any]:
         """所有实验阶段完成后写入可复现性清单。"""
@@ -453,10 +498,23 @@ class Experiment:
         }
 
     def run(self) -> dict[str, Any]:
-        self.prepare_data()
-        self.build_features()
-        self.prepare_dataset()
-        self.train()
-        self.evaluate()
-        self.predict()
-        return self.export()
+        self._log.info("=" * 60)
+        self._log.info("Experiment '%s' starting (mode=%s)", self.spec.name, self.mode)
+        self._log.info("=" * 60)
+
+        phases = [
+            ("prepare_data", self.prepare_data),
+            ("build_features", self.build_features),
+            ("prepare_dataset", self.prepare_dataset),
+            ("train", self.train),
+            ("evaluate", self.evaluate),
+            ("predict", self.predict),
+        ]
+        for name, method in phases:
+            t0 = time.monotonic()
+            method()
+            self._log.info("Phase '%s' completed in %.1fs", name, time.monotonic() - t0)
+
+        manifest = self.export()
+        self._log.info("Experiment '%s' complete. Output: %s", self.spec.name, self.output_dir)
+        return manifest

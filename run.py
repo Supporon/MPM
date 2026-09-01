@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.core.config import ConfigError, load_config
 from src.core.experiment import Experiment
+from src.utils.logging import get_logger
 
 
 def main() -> int:
@@ -23,9 +24,22 @@ def main() -> int:
         action="store_true",
         help="Validate and print the resolved component graph without touching dataset files.",
     )
+    parser.add_argument(
+        "--set",
+        nargs="*",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Override config values (e.g. --set model.name=spe tuning.params.n_iter=100)",
+    )
     args = parser.parse_args()
+    log = get_logger("run")
     try:
+        log.info("Loading config from %s", args.config)
         config = load_config(args.config)
+        if args.set:
+            from src.core.config import apply_cli_overrides
+            config = apply_cli_overrides(config, args.set)
+            log.info("Applied %d CLI override(s)", len(args.set))
         if args.validate_only:
             spec = config.spec
             print(
@@ -49,9 +63,11 @@ def main() -> int:
                     ensure_ascii=False,
                 )
             )
+            log.info("Config validation passed")
             return 0
         manifest = Experiment(config).run()
     except (ConfigError, FileNotFoundError, RuntimeError, ValueError, NotImplementedError) as error:
+        log.error("Experiment failed: %s", error)
         parser.error(str(error))
     print(f"Completed {manifest['experiment']} -> {config.output_dir}")
     return 0

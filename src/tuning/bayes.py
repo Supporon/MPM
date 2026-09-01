@@ -6,6 +6,7 @@ from typing import Any, Mapping
 
 from ..core.contracts import OptionalDependencyError, TrainingData
 from ..models.registry import fit_params_for
+from ..utils.logging import get_logger
 from ..validation.metrics import build_metric_scorer
 from ..validation.splitters import build_cv
 from .registry import TUNER_REGISTRY
@@ -70,20 +71,30 @@ class BayesTuner:
         scoring: str,
         seed: int,
     ):
+        log = get_logger("bayes")
         try:
             from skopt import BayesSearchCV
         except ImportError as error:
             raise OptionalDependencyError("Bayesian tuning requires scikit-optimize (skopt).") from error
         model = model_adapter.build(model_params, seed)
+        search_space = build_bayes_search_space(tuning_params.get("search_space", {}))
+        n_iter = int(tuning_params.get("n_iter", 50))
+        cv = build_cv(cv_config["name"], cv_config.get("params", {}), seed, data)
+        log.info(
+            "Bayesian search: n_iter=%d, cv=%s(%d folds), scoring=%s, params=%s",
+            n_iter, cv_config["name"], cv.get_n_splits(), scoring, sorted(search_space),
+        )
         searcher = BayesSearchCV(
             model,
-            build_bayes_search_space(tuning_params.get("search_space", {})),
-            n_iter=int(tuning_params.get("n_iter", 50)),
+            search_space,
+            n_iter=n_iter,
             scoring=build_metric_scorer(scoring, data),
-            cv=build_cv(cv_config["name"], cv_config.get("params", {}), seed, data),
+            cv=cv,
             n_jobs=int(tuning_params.get("n_jobs", model_params.get("n_jobs", -1))),
             random_state=seed,
             verbose=int(tuning_params.get("verbose", 0)),
         )
         searcher.fit(data.features, data.labels, **fit_params_for(model_adapter, data))
+        log.info("Bayesian search complete. Best score=%.4f, best params=%s",
+                 searcher.best_score_, searcher.best_params_)
         return searcher.best_estimator_

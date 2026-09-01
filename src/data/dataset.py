@@ -9,6 +9,8 @@ from typing import Any, Mapping
 
 import pandas as pd
 
+from ..utils.logging import get_logger
+
 
 @dataclass
 class ArchiveDataset:
@@ -101,12 +103,14 @@ class DatasetRepository:
 
     def load_archive(self) -> ArchiveDataset:
         """加载必需的归档 CSV 文件并校验其共享 schema。"""
+        log = get_logger("dataset")
         if not self.archive_dir.is_dir():
             raise FileNotFoundError(f"Configured archive directory does not exist: {self.archive_dir}")
         paths = {name: self.archive_dir / name for name in self.REQUIRED_FILES}
         missing = [str(path) for path in paths.values() if not path.is_file()]
         if missing:
             raise FileNotFoundError(f"Archive is missing required artifacts: {missing}")
+        log.info("Loading %d archive files from %s", len(paths), self.archive_dir)
         dataset = ArchiveDataset(
             archive_dir=self.archive_dir,
             xy_train=pd.read_csv(paths["Xy_train.csv"]),
@@ -119,6 +123,8 @@ class DatasetRepository:
             source_files=paths,
         )
         dataset.validate_schema()
+        log.info("Archive loaded: %d features, train=%d, test=%d",
+                 len(dataset.feature_columns), len(dataset.train_split), len(dataset.test_split))
         return dataset
 
     @staticmethod

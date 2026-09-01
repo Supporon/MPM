@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.core.bootstrap import load_builtin_components
-from src.core.config import ConfigError, ExperimentConfig, load_config, validate_config
+from src.core.config import ConfigError, ExperimentConfig, apply_cli_overrides, load_config, validate_config
 from src.core.contracts import TrainingData
 from src.core.contracts import OptionalDependencyError
 from src.core.experiment import Experiment
@@ -465,12 +465,13 @@ class FrameworkTests(unittest.TestCase):
 
             self.assertEqual(manifest["feature_count"], 2)
             self.assertEqual(manifest["components"]["model"], "rf")
-            self.assertTrue((output_dir / "config_resolved.yaml").is_file())
-            self.assertTrue((output_dir / "manifest.json").is_file())
-            self.assertTrue((output_dir / "metrics.json").is_file())
-            self.assertEqual((output_dir / "models" / "model_rf.pkl").read_bytes(), b"synthetic-model")
-            self.assertEqual((output_dir / "predictions" / "probability_map.tif").read_bytes(), b"synthetic-tiff")
-            stored = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+            actual_dir = experiment.output_dir
+            self.assertTrue((actual_dir / "config_resolved.yaml").is_file())
+            self.assertTrue((actual_dir / "manifest.json").is_file())
+            self.assertTrue((actual_dir / "metrics.json").is_file())
+            self.assertEqual((actual_dir / "models" / "model_rf.pkl").read_bytes(), b"synthetic-model")
+            self.assertEqual((actual_dir / "predictions" / "probability_map.tif").read_bytes(), b"synthetic-tiff")
+            stored = json.loads((actual_dir / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(stored["components"]["feature_operators"][0], "raster_statistics")
             artifacts = stored["input_paths"]["archive_artifacts"]
             for filename in (
@@ -503,8 +504,9 @@ class FrameworkTests(unittest.TestCase):
             values["predicates"] = {"enabled": True, "combine": "sequential", "items": [{"name": "identity", "params": {}}]}
             validate_config(values)
 
-            manifest = Experiment(ExperimentConfig(values=values, source_path=loaded.source_path)).run()
-            metrics = json.loads((output_dir / "metrics.json").read_text(encoding="utf-8"))
+            experiment = Experiment(ExperimentConfig(values=values, source_path=loaded.source_path))
+            manifest = experiment.run()
+            metrics = json.loads((experiment.output_dir / "metrics.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["components"]["tuner"], "none")
             self.assertEqual(manifest["components"]["knowledge"], ["empty"])
             self.assertEqual(manifest["components"]["predicates"], ["identity"])
@@ -518,9 +520,9 @@ class FrameworkTests(unittest.TestCase):
             )
             self.assertNotIn("cross_validation", manifest["component_metadata"])
             self.assertIn("f1", metrics)
-            self.assertTrue((output_dir / "models" / "model_rf.pkl").is_file())
-            self.assertTrue((output_dir / "predictions" / "target_probs.csv").is_file())
-            self.assertFalse((output_dir / "predictions" / "probability_map.tif").exists())
+            self.assertTrue((experiment.output_dir / "models" / "model_rf.pkl").is_file())
+            self.assertTrue((experiment.output_dir / "predictions" / "target_probs.csv").is_file())
+            self.assertFalse((experiment.output_dir / "predictions" / "probability_map.tif").exists())
 
     def test_yaml_plugin_can_add_and_select_model_without_experiment_changes(self) -> None:
         loaded = load_config(LACHLAN_CONFIG)
@@ -562,11 +564,58 @@ class FrameworkTests(unittest.TestCase):
                     yaml.safe_dump(values, sort_keys=False), encoding="utf-8"
                 )
                 plugin_config = load_config(config_path)
-                manifest = Experiment(plugin_config).run()
+                experiment = Experiment(plugin_config)
+                manifest = experiment.run()
             finally:
                 sys.path.remove(str(root))
             self.assertEqual(manifest["components"]["model"], "dummy_logistic")
-            self.assertTrue((output_dir / "models" / "model_dummy_logistic.pkl").is_file())
+            self.assertTrue((experiment.output_dir / "models" / "model_dummy_logistic.pkl").is_file())
+
+    def test_cli_overrides_merge_and_validate(self) -> None:
+        config = load_config(LACHLAN_CONFIG)
+        # 覆盖 model.name
+        overridden = apply_cli_overrides(config, ["model.name=spe"])
+        self.assertEqual(overridden.values["model"]["name"], "spe")
+        self.assertEqual(overridden.spec.model.name, "spe")
+        self.assertEqual(overridden.source_path, config.source_path)
+
+        # 覆盖 tuning.params.n_iter（数值）
+        overridden = apply_cli_overrides(config, ["tuning.params.n_iter=200"])
+        self.assertEqual(overridden.values["tuning"]["params"]["n_iter"], 200)
+
+        # 覆盖 experiment.seed（整数）
+        overridden = apply_cli_overrides(config, ["experiment.seed=123"])
+        self.assertEqual(overridden.values["experiment"]["seed"], 123)
+        self.assertEqual(overridden.spec.seed, 123)
+
+        # 覆盖布尔值
+        overridden = apply_cli_overrides(config, ["label_refinement.enabled=true"])
+        self.assertTrue(overridden.values["label_refinement"]["enabled"])
+
+        # 多参数覆盖
+        overridden = apply_cli_overrides(
+            config,
+            ["model.name=cnn", "tuning.name=none", "experiment.seed=999"],
+        )
+        self.assertEqual(overridden.values["model"]["name"], "cnn")
+        self.assertEqual(overridden.values["tuning"]["name"], "none")
+        self.assertEqual(overridden.values["experiment"]["seed"], 999)
+
+        # 无效覆盖应抛出 ConfigError
+        with self.assertRaises(ConfigError):
+            apply_cli_overrides(config, ["model.name=not_a_model"])
+
+        # 原配置不受影响（不可变语义）
+        self.assertEqual(config.values["model"]["name"], "rf")
+
+        # 有效的覆盖后配置可通过 Experiment 运行
+        overridden = apply_cli_overrides(
+            config,
+            ["experiment.execution_mode=train_from_archive_features",
+             "tuning.name=none",
+             "prediction.export_geotiff=false"],
+        )
+        self.assertEqual(overridden.spec.execution_mode, "train_from_archive_features")
 
     def test_deep_edge_task_is_registered_but_explicitly_unavailable(self) -> None:
         with self.assertRaises(TaskCapabilityError):

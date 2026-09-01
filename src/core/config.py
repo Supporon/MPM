@@ -10,6 +10,7 @@ from typing import Any, Mapping
 
 import yaml
 
+from ..utils.logging import get_logger
 from .spec import ExperimentSpec
 
 
@@ -98,6 +99,69 @@ def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[st
         else:
             merged[key] = copy.deepcopy(value)
     return merged
+
+
+def _coerce_value(value: str) -> int | float | bool | str:
+    """将 CLI 字符串值智能转换为 int / float / bool，否则保持字符串。"""
+    if not isinstance(value, str):
+        return value
+    lowered = value.lower()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+    # 尝试 int，再尝试 float
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        pass
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        pass
+    return value
+
+
+def _dot_to_nested(overrides: dict[str, Any]) -> dict[str, Any]:
+    """将 ``{"a.b.c": v}`` 展开为 ``{"a": {"b": {"c": v}}}``。
+
+    冲突处理：若同时存在 ``a.b = 1`` 和 ``a.b.c = 2``，后者覆盖前者。
+    """
+    result: dict[str, Any] = {}
+    for key, value in overrides.items():
+        parts = key.split(".")
+        current = result
+        for i, part in enumerate(parts[:-1]):
+            if part not in current or not isinstance(current[part], dict):
+                current[part] = {}
+            current = current[part]
+        # 如果中间路径上已有非 dict 值，强制替换为 dict（后设置的覆盖前的）
+        if parts[-1] in current and isinstance(current[parts[-1]], dict) and not isinstance(value, dict):
+            # 保留 dict 叶子不变，仅当 value 不是 dict 时覆盖
+            pass
+        current[parts[-1]] = value
+    return result
+
+
+def apply_cli_overrides(config: ExperimentConfig, raw_overrides: list[str]) -> ExperimentConfig:
+    """解析 CLI ``--set key=value`` 参数，合并到配置中并重新校验。
+
+    返回一个新的 ``ExperimentConfig``，原配置不受影响。
+    所有覆盖值会记录在 ``config_resolved.yaml`` 中。
+    """
+    if not raw_overrides:
+        return config
+    parsed: dict[str, str] = {}
+    for item in raw_overrides:
+        if "=" not in item:
+            raise ConfigError(f"Invalid --set value: '{item}' (expected KEY=VALUE)")
+        key, _, value = item.partition("=")
+        key = key.strip()
+        if not key:
+            raise ConfigError(f"Invalid --set value: '{item}' (key is empty)")
+        parsed[key] = _coerce_value(value.strip())
+    overrides_nested = _dot_to_nested(parsed)
+    merged = _deep_merge(copy.deepcopy(config.values), overrides_nested)
+    validate_config(merged)
+    return ExperimentConfig(values=merged, source_path=config.source_path)
 
 
 def _legacy_space_to_explicit(space: Mapping[str, Any]) -> dict[str, Any]:
@@ -347,9 +411,11 @@ def validate_config(config: Mapping[str, Any]) -> None:
 
 
 def load_config(path: str | Path) -> ExperimentConfig:
+    log = get_logger("config")
     source_path = Path(path).resolve()
     if not source_path.is_file():
         raise ConfigError(f"Configuration file not found: {source_path}")
+    log.info("Loading config: %s", source_path)
     with source_path.open("r", encoding="utf-8") as handle:
         loaded = yaml.safe_load(handle) or {}
     if not isinstance(loaded, Mapping):
@@ -360,4 +426,6 @@ def load_config(path: str | Path) -> ExperimentConfig:
     config_root = source_path.parents[2] if len(source_path.parents) >= 3 else source_path.parent
     _resolve_dataset_paths(resolved, config_root)
     validate_config(resolved)
+    log.info("Config loaded and validated: experiment=%s, model=%s, mode=%s",
+             resolved["experiment"]["name"], resolved["model"]["name"], resolved["experiment"]["execution_mode"])
     return ExperimentConfig(values=resolved, source_path=source_path)

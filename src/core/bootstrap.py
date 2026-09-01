@@ -11,6 +11,7 @@ def load_builtin_components() -> None:
         return
     from ..knowledge import providers as _knowledge  # noqa: F401
     from ..models import pu as _pu  # noqa: F401
+    from ..models import cnn as _cnn  # noqa: F401
     from ..models import rf as _rf  # noqa: F401
     from ..models import spe as _spe  # noqa: F401
     from ..operators.features import builtins as _operators  # noqa: F401
