@@ -812,6 +812,19 @@ class FrameworkTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "train_positive"):
             validate_config(values)
 
+    def test_validate_reproduction_rejects_zero_run_false_positive(self) -> None:
+        """P0-7: 零运行验证不得报告"可正确复现"。"""
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import validate_reproduction
+
+        report = validate_reproduction.generate_report(
+            {"total": 0, "passed": 0, "failed": 0, "details": []},
+            [],
+            {},
+        )
+        self.assertIn("未验证复现", report)
+        self.assertNotIn("可正确复现", report)
+
     def test_spatial_block_kfold_requires_coordinates(self) -> None:
         """P0-4: spatial_block_kfold 缺少坐标时抛出明确错误"""
         data = TrainingData(

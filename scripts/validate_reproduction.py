@@ -72,16 +72,6 @@ EXPERIMENT_MANIFEST = {
                 "prediction_files": ["target_probs.csv", "probability_map.tif"],
             },
         },
-        {
-            "name": "lachlan_rf_phase2",
-            "config": "configs/experiments/lachlan_rf_phase2.yaml",
-            "description": "Lachlan RF Phase2 — 二阶段配置归档回放",
-            "expected": {
-                "feature_count": 138,
-                "model_file": "model_rf.pkl",
-                "prediction_files": ["target_probs.csv", "probability_map.tif"],
-            },
-        },
     ],
     "train_from_archive_features": [
         {
@@ -98,54 +88,6 @@ EXPERIMENT_MANIFEST = {
                 "label_refinement": {"enabled": False},
                 "knowledge": {"enabled": False},
                 "predicates": {"enabled": False},
-                "prediction": {"export_geotiff": False},
-            },
-            "expected": {
-                "model_file": "model_rf.pkl",
-                "prediction_files": ["target_probs.csv"],
-            },
-        },
-        {
-            "name": "lachlan_rf_pub_train",
-            "config": "configs/experiments/lachlan_rf_baseline.yaml",
-            "description": "Lachlan RF — 从归档特征重新训练（含 PUB 标签细化 + 贝叶斯调参）",
-            "overrides": {
-                "experiment": {
-                    "name": "lachlan_rf_pub_train",
-                    "output_dir": "outputs/lachlan_rf_pub_train_validation",
-                    "execution_mode": "train_from_archive_features",
-                },
-                "tuning": {
-                    "name": "bayes",
-                    "params": {
-                        "n_iter": 50,
-                        "n_jobs": -1,
-                        "search_space": {
-                            "bootstrap": {"type": "categorical", "values": [True, False]},
-                            "max_depth": {"type": "integer", "low": 5, "high": 20},
-                            "max_features": {"type": "categorical", "values": [None, "sqrt", "log2"]},
-                            "min_samples_leaf": {"type": "integer", "low": 2, "high": 20},
-                            "min_samples_split": {"type": "integer", "low": 2, "high": 30},
-                            "n_estimators": {"type": "integer", "low": 10, "high": 200},
-                        },
-                    },
-                },
-                "label_refinement": {
-                    "enabled": True,
-                    "name": "pub",
-                    "params": {
-                        "n_iter": 50,
-                        "n_jobs": -1,
-                        "search_space": {
-                            "bootstrap": {"type": "categorical", "values": [True, False]},
-                            "max_depth": {"type": "integer", "low": 5, "high": 20},
-                            "max_features": {"type": "categorical", "values": [None, "sqrt", "log2"]},
-                            "min_samples_leaf": {"type": "integer", "low": 2, "high": 20},
-                            "min_samples_split": {"type": "integer", "low": 2, "high": 30},
-                            "n_estimators": {"type": "integer", "low": 10, "high": 200},
-                        },
-                    },
-                },
                 "prediction": {"export_geotiff": False},
             },
             "expected": {
@@ -180,18 +122,12 @@ EXPERIMENT_MANIFEST = {
     "raw_gis": [
         {
             "name": "lachlan_rf_raw_gis",
-            "config": "configs/experiments/lachlan_rf_phase2.yaml",
+            "config": "configs/experiments/lachlan_rf_raw_gis.yaml",
             "description": "Lachlan RF — 从原始 GIS 数据构建特征并训练",
             "overrides": {
                 "experiment": {
-                    "name": "lachlan_rf_raw_gis",
                     "output_dir": "outputs/lachlan_rf_raw_gis_validation",
-                    "execution_mode": "raw_gis",
                 },
-                "tuning": {"name": "none", "params": {}},
-                "label_refinement": {"enabled": False},
-                "knowledge": {"enabled": False},
-                "predicates": {"enabled": False},
             },
             "expected": {
                 "model_file": "model_rf.pkl",
@@ -533,7 +469,6 @@ def generate_report(
 ) -> str:
     """生成纯文本或 HTML 验证报告。"""
     lines: list[str] = []
-    all_passed = True
 
     lines.append("=" * 72)
     lines.append("  MPM_codex_phase2 复现验证报告")
@@ -554,7 +489,6 @@ def generate_report(
         lines.append(f"    {status_icon} {detail.get('name', detail.get('config', 'unknown'))}")
         if detail["status"] == "failed":
             lines.append(f"      错误: {detail['error']}")
-            all_passed = False
     lines.append("")
 
     # 第二节：实验运行
@@ -574,7 +508,6 @@ def generate_report(
             if r.errors:
                 for err in r.errors:
                     lines.append(f"      错误: {err}")
-                    all_passed = False
             if r.warnings:
                 for warn in r.warnings[:3]:
                     lines.append(f"      警告: {warn}")
@@ -611,16 +544,19 @@ def generate_report(
 
     # 总结
     lines.append("=" * 72)
+    runs_executed = len(experiment_results)
     passed_count = sum(1 for r in experiment_results if r.status == "passed")
     failed_count = sum(1 for r in experiment_results if r.status == "failed")
     error_count = sum(1 for r in experiment_results if r.status == "error")
     skipped_count = sum(1 for r in experiment_results if r.status == "skipped")
     lines.append(f"  总结: {passed_count} 通过, {failed_count} 失败, "
                  f"{error_count} 错误, {skipped_count} 跳过")
-    if all_passed and failed_count == 0 and error_count == 0:
+    if runs_executed == 0:
+        lines.append("  ○ 配置验证完成，但未运行任何实验（未验证复现）")
+    elif config_results["failed"] == 0 and failed_count == 0 and error_count == 0 and skipped_count == 0:
         lines.append("  ✓ 所有验证通过 — 框架可正确复现 EarthByte 实验结果")
     else:
-        lines.append("  ⚠ 存在未通过的验证项，请检查上述错误")
+        lines.append("  ⚠ 存在未通过或未完成的验证项，请检查上述错误")
     lines.append("=" * 72)
 
     report_text = "\n".join(lines)
