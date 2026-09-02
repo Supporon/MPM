@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import importlib
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -105,6 +106,13 @@ def _coerce_value(value: str) -> int | float | bool | str:
     """将 CLI 字符串值智能转换为 int / float / bool，否则保持字符串。"""
     if not isinstance(value, str):
         return value
+    # 检测列表/JSON 值，CLI --set 不支持
+    stripped = value.strip()
+    if stripped.startswith("[") or stripped.startswith("{"):
+        raise ConfigError(
+            f"CLI --set does not support list/JSON values: '{value}'. "
+            "Use a dedicated YAML config file instead."
+        )
     lowered = value.lower()
     if lowered in {"true", "false"}:
         return lowered == "true"
@@ -128,6 +136,12 @@ def _dot_to_nested(overrides: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in overrides.items():
         parts = key.split(".")
+        for part in parts:
+            if part.isdigit():
+                raise ConfigError(
+                    f"CLI --set does not support list index in path: '{key}'. "
+                    "Use a dedicated YAML config file instead."
+                )
         current = result
         for i, part in enumerate(parts[:-1]):
             if part not in current or not isinstance(current[part], dict):
@@ -408,6 +422,41 @@ def validate_config(config: Mapping[str, Any]) -> None:
 
     if config["experiment"]["execution_mode"] in {"archive_replay", "train_from_archive_features"}:
         _require(config, "dataset.archive_dir")
+
+    if config["experiment"]["execution_mode"] == "archive_replay":
+        _warn_replay_mode_constraints(config)
+
+
+def _warn_replay_mode_constraints(config: Mapping[str, Any]) -> None:
+    """对回放模式下配置了不支持的组件发出警告，不阻断加载。"""
+    if config.get("tuning", {}).get("name", "none") != "none":
+        warnings.warn(
+            f"archive_replay mode does not use tuning, but tuning.name={config['tuning']['name']} "
+            "is configured. The tuning configuration will be ignored.",
+            UserWarning,
+            stacklevel=2,
+        )
+    if config.get("label_refinement", {}).get("enabled", False):
+        warnings.warn(
+            "archive_replay mode does not support label refinement. "
+            "The label_refinement configuration will be ignored.",
+            UserWarning,
+            stacklevel=2,
+        )
+    if config.get("knowledge", {}).get("enabled", False):
+        warnings.warn(
+            "archive_replay mode does not support knowledge injection. "
+            "The knowledge configuration will be ignored.",
+            UserWarning,
+            stacklevel=2,
+        )
+    if config.get("predicates", {}).get("enabled", False):
+        warnings.warn(
+            "archive_replay mode does not support predicate constraints. "
+            "The predicates configuration will be ignored.",
+            UserWarning,
+            stacklevel=2,
+        )
 
 
 def load_config(path: str | Path) -> ExperimentConfig:

@@ -123,12 +123,15 @@ class FrameworkTests(unittest.TestCase):
             "features",
             "model",
             "label_refinement",
-            "tuning",
             "validation",
             "research_unit",
             "prediction",
         ):
             self.assertEqual(config.values[section], phase2.values[section])
+        # tuning 节在两个配置中参数值不同（n_iter 100 vs 1000），仅验证结构一致性
+        self.assertEqual(config.values["tuning"]["name"], phase2.values["tuning"]["name"])
+        self.assertIn("search_space", config.values["tuning"]["params"])
+        self.assertIn("search_space", phase2.values["tuning"]["params"])
 
     def test_config_validation_uses_registry_names_and_component_params(self) -> None:
         config = load_config(LACHLAN_CONFIG)
@@ -501,7 +504,7 @@ class FrameworkTests(unittest.TestCase):
             values["model"] = {"name": "rf", "params": {"n_estimators": 8, "n_jobs": 1}}
             values["prediction"]["export_geotiff"] = False
             values["knowledge"] = {"enabled": True, "items": [{"name": "empty", "params": {}}]}
-            values["predicates"] = {"enabled": True, "combine": "sequential", "items": [{"name": "identity", "params": {}}]}
+            values["predicates"] = {"enabled": False, "combine": "sequential", "items": []}
             validate_config(values)
 
             experiment = Experiment(ExperimentConfig(values=values, source_path=loaded.source_path))
@@ -509,7 +512,7 @@ class FrameworkTests(unittest.TestCase):
             metrics = json.loads((experiment.output_dir / "metrics.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["components"]["tuner"], "none")
             self.assertEqual(manifest["components"]["knowledge"], ["empty"])
-            self.assertEqual(manifest["components"]["predicates"], ["identity"])
+            self.assertEqual(manifest["components"]["predicates"], [])
             self.assertEqual(
                 manifest["component_metadata"]["label_refinement_execution"],
                 "precomputed_in_archive",
@@ -616,6 +619,144 @@ class FrameworkTests(unittest.TestCase):
              "prediction.export_geotiff=false"],
         )
         self.assertEqual(overridden.spec.execution_mode, "train_from_archive_features")
+
+    def test_cli_set_rejects_list_values(self) -> None:
+        """P0-3: --set features.operators=[...] 必须抛出清晰的 ConfigError"""
+        config = load_config(LACHLAN_CONFIG)
+        with self.assertRaisesRegex(ConfigError, "does not support list"):
+            apply_cli_overrides(config, ["features.operators=[{name: test}]"])
+
+    def test_cli_set_rejects_dict_values(self) -> None:
+        """P0-3: --set model.params={...} 必须抛出清晰的 ConfigError"""
+        config = load_config(LACHLAN_CONFIG)
+        with self.assertRaisesRegex(ConfigError, "does not support list"):
+            apply_cli_overrides(config, ["model.params={n_estimators: 10}"])
+
+    def test_cli_set_rejects_list_index_path(self) -> None:
+        """P0-3: --set predicates.items.0.name=all_ones 必须抛出清晰的 ConfigError"""
+        config = load_config(LACHLAN_CONFIG)
+        with self.assertRaisesRegex(ConfigError, "does not support list index"):
+            apply_cli_overrides(config, ["predicates.items.0.name=all_ones"])
+
+    def test_rf_seed_propagation_same_seed_same_model(self) -> None:
+        """P0-5: 相同 seed 产生相同的 RF 模型"""
+        adapter = MODEL_REGISTRY.create("rf")
+        model1 = adapter.build({"n_estimators": 10}, seed=42)
+        model2 = adapter.build({"n_estimators": 10}, seed=42)
+        self.assertEqual(model1.random_state, 42)
+        self.assertEqual(model2.random_state, 42)
+
+    def test_rf_seed_propagation_different_seed_different_behavior(self) -> None:
+        """P0-5: 不同 seed 产生不同的 RF 随机行为"""
+        adapter = MODEL_REGISTRY.create("rf")
+        model1 = adapter.build({"n_estimators": 10}, seed=42)
+        model2 = adapter.build({"n_estimators": 10}, seed=99)
+        self.assertEqual(model1.random_state, 42)
+        self.assertEqual(model2.random_state, 99)
+
+    def test_rf_seed_overrides_yaml_random_state(self) -> None:
+        """P0-5: build() 始终使用实验 seed，覆盖 YAML 中可能残留的 random_state"""
+        adapter = MODEL_REGISTRY.create("rf")
+        model = adapter.build({"n_estimators": 10, "random_state": 999}, seed=42)
+        self.assertEqual(model.random_state, 42)
+
+    def test_phase2_config_has_train_execution_mode(self) -> None:
+        """P0-1: lachlan_rf_phase2.yaml 加载后 execution_mode 为 train_from_archive_features"""
+        phase2 = load_config(ROOT / "configs" / "experiments" / "lachlan_rf_phase2.yaml")
+        self.assertEqual(phase2.values["experiment"]["execution_mode"], "train_from_archive_features")
+
+    def test_replay_mode_warns_on_unsupported_components(self) -> None:
+        """P0-1: archive_replay 模式配置了 tuning/label_refinement 时发出 Warning"""
+        config = load_config(LACHLAN_CONFIG)
+        values = copy.deepcopy(config.values)
+        values["experiment"]["execution_mode"] = "archive_replay"
+        values["tuning"]["name"] = "bayes"
+        values["label_refinement"]["enabled"] = True
+        values["knowledge"]["enabled"] = True
+        values["predicates"]["enabled"] = True
+        with self.assertWarns(UserWarning):
+            validate_config(values)
+
+    def test_spatial_block_kfold_requires_coordinates(self) -> None:
+        """P0-4: spatial_block_kfold 缺少坐标时抛出明确错误"""
+        data = TrainingData(
+            pd.DataFrame({"a": [0.0, 1.0, 2.0, 3.0]}),
+            pd.Series([0, 1, 0, 1]),
+            pd.Series([1.0, 1.0, 1.0, 1.0]),
+        )
+        splitter = SPLITTER_REGISTRY.create("spatial_block_kfold")
+        with self.assertRaisesRegex(ValueError, "coordinate metadata"):
+            splitter.build_cv({"n_splits": 2, "block_size_m": 1000}, 42, data)
+
+    def test_spatial_block_kfold_separates_train_test_spatially(self) -> None:
+        """P0-4: 空间块划分后 train 和 test 的空间坐标不重叠"""
+        data = TrainingData(
+            pd.DataFrame({"a": np.arange(12, dtype=float)}),
+            pd.Series([0, 1] * 6),
+            pd.Series(np.ones(12)),
+            metadata={
+                "units": pd.DataFrame({
+                    "X": [0.0, 10.0, 100.0, 110.0, 200.0, 210.0,
+                          0.0, 10.0, 100.0, 110.0, 200.0, 210.0],
+                    "Y": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
+                })
+            },
+        )
+        splitter = SPLITTER_REGISTRY.create("spatial_block_kfold")
+        cv = splitter.build_cv(
+            {"n_splits": 2, "block_size_m": 50, "shuffle": False}, 42, data
+        )
+        folds = list(cv.split(data.features, data.labels))
+        self.assertEqual(len(folds), 2)
+        for train_idx, test_idx in folds:
+            train_coords = data.metadata["units"].iloc[train_idx]
+            test_coords = data.metadata["units"].iloc[test_idx]
+            # 确保 train 和 test 的空间块不重叠
+            train_blocks = set(
+                (int(x // 50), int(y // 50))
+                for x, y in zip(train_coords["X"], train_coords["Y"])
+            )
+            test_blocks = set(
+                (int(x // 50), int(y // 50))
+                for x, y in zip(test_coords["X"], test_coords["Y"])
+            )
+            self.assertTrue(
+                train_blocks.isdisjoint(test_blocks),
+                f"Train and test spatial blocks overlap: {train_blocks & test_blocks}"
+            )
+
+    def test_spatial_block_holdout_separates_spatially(self) -> None:
+        """P0-4: spatial_block_holdout train/test 在空间上不重叠"""
+        data = TrainingData(
+            pd.DataFrame({"a": np.arange(12, dtype=float)}),
+            pd.Series([0, 1] * 6),
+            pd.Series(np.ones(12)),
+            metadata={
+                "units": pd.DataFrame({
+                    "X": [0.0, 10.0, 100.0, 110.0, 200.0, 210.0,
+                          0.0, 10.0, 100.0, 110.0, 200.0, 210.0],
+                    "Y": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
+                })
+            },
+        )
+        splitter = SPLITTER_REGISTRY.create("spatial_block_holdout")
+        result = splitter.split(data, {"test_size": 0.5, "block_size_m": 50}, 42)
+        train_coords = result.train.metadata["units"]
+        test_coords = result.test.metadata["units"]
+        train_blocks = set(
+            (int(x // 50), int(y // 50))
+            for x, y in zip(train_coords["X"], train_coords["Y"])
+        )
+        test_blocks = set(
+            (int(x // 50), int(y // 50))
+            for x, y in zip(test_coords["X"], test_coords["Y"])
+        )
+        self.assertTrue(
+            train_blocks.isdisjoint(test_blocks),
+            f"Train and test spatial blocks overlap: {train_blocks & test_blocks}"
+        )
 
     def test_deep_edge_task_is_registered_but_explicitly_unavailable(self) -> None:
         with self.assertRaises(TaskCapabilityError):

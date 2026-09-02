@@ -38,8 +38,10 @@ class TargetAreaPredictionTask:
             raise ValueError(
                 "target_area_prediction currently requires research_unit.type=point_local_environment"
             )
-        if prediction_config["score_type"] != "probability":
-            raise ValueError("target_area_prediction currently supports only probability scores")
+        if prediction_config["score_type"] not in {"probability", "raw_score", "relative_score"}:
+            raise ValueError(
+                "target_area_prediction score_type must be probability, raw_score, or relative_score"
+            )
         if prediction_config["normalization"] not in {"minmax", "none", None}:
             raise ValueError("target_area_prediction normalization must be minmax or none")
         if float(research_unit_config["prediction_grid_size"]) <= 0:
@@ -71,9 +73,11 @@ class TargetAreaPredictionTask:
         return build_positive_units(dataset_config["occurrence"], label_config)
 
     def build_unlabeled_units(
-        self, dataset_config, research_unit_config, label_config, count: int
+        self, dataset_config, research_unit_config, label_config, count: int, seed: int | None = None
     ) -> pd.DataFrame:
-        return sample_unlabeled_units(dataset_config["training_boundary"], count, label_config)
+        return sample_unlabeled_units(
+            dataset_config["training_boundary"], count, label_config, seed=seed
+        )
 
     def build_prediction_units(self, dataset_config, research_unit_config):
         units, mask = build_prediction_grid(
@@ -105,22 +109,43 @@ class TargetAreaPredictionTask:
         return target, target[["X", "Y"]].reset_index(drop=True), aligned_mask
 
     def predict(self, model: Any, target_features: pd.DataFrame, target_coords: pd.DataFrame) -> pd.DataFrame:
-        """返回有效目标单元的坐标与正类得分。"""
-        if self.prediction_config["score_type"] != "probability":
-            raise ValueError("Only probability target scoring is supported by target_area_prediction")
+        """返回有效目标单元的坐标与正类得分。
+
+        根据 score_type 配置决定输出列名：
+        - ``probability`` (默认): 列名为 ``prob``，向后兼容
+        - ``raw_score``: 列名为 ``raw_score``，未经归一化的原始分数
+        - ``relative_score``: 列名为 ``relative_score``，MinMax 归一化后的相对分数
+        """
+        score_type = self.prediction_config.get("score_type", "probability")
+        if score_type not in {"probability", "raw_score", "relative_score"}:
+            raise ValueError(
+                f"Unsupported score_type: {score_type!r}"
+            )
+
         probabilities = model.predict_proba(target_features)[:, 1]
         if self.prediction_config["normalization"] == "minmax":
-            warnings.warn(
-                "Baseline compatibility: applying MinMaxScaler.fit_transform over the target area; scores are not calibrated probabilities.",
-                UserWarning,
-                stacklevel=2,
-            )
+            if score_type == "probability":
+                warnings.warn(
+                    "Baseline compatibility: applying MinMaxScaler.fit_transform over the target area; "
+                    "scores are not calibrated probabilities. "
+                    "Consider using score_type=relative_score to make this explicit.",
+                    UserWarning,
+                    stacklevel=2,
+                )
             probabilities = MinMaxScaler().fit_transform(probabilities.reshape(-1, 1)).ravel()
         elif self.prediction_config["normalization"] not in {None, "none"}:
             raise ValueError(
                 f"Unsupported target score normalization: {self.prediction_config['normalization']}"
             )
-        return pd.DataFrame({"X": target_coords["X"], "Y": target_coords["Y"], "prob": probabilities})
+
+        if score_type == "raw_score":
+            score_col = "raw_score"
+        elif score_type == "relative_score":
+            score_col = "relative_score"
+        else:
+            score_col = "prob"  # 向后兼容
+
+        return pd.DataFrame({"X": target_coords["X"], "Y": target_coords["Y"], score_col: probabilities})
 
     @staticmethod
     def reconstruct_grid(probabilities: pd.DataFrame, target_mask: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -129,8 +154,13 @@ class TargetAreaPredictionTask:
             raise ValueError(
                 "target_mask true-cell count does not match target probability rows; cannot reconstruct GeoTIFF"
             )
+        # 动态检测分数列名（prob / raw_score / relative_score）
+        score_col = next(
+            (c for c in probabilities.columns if c in {"prob", "raw_score", "relative_score"}),
+            "prob",
+        )
         values = np.full(len(target_mask), np.nan, dtype=np.float32)
-        values[flags] = probabilities["prob"].to_numpy(dtype=np.float32)
+        values[flags] = probabilities[score_col].to_numpy(dtype=np.float32)
         x_values = np.unique(target_mask.iloc[:, 0].to_numpy(dtype=float))
         y_values = np.unique(target_mask.iloc[:, 1].to_numpy(dtype=float))
         return values.reshape((len(y_values), len(x_values))), x_values, y_values
@@ -151,7 +181,8 @@ class TargetAreaPredictionTask:
         )
         dataset.SetGeoTransform((float(x_values.min()), step_x, 0, float(y_values.max()), 0, -step_y))
         srs = osr.SpatialReference()
-        srs.ImportFromEPSG(4283)
+        target_crs = int(self.prediction_config.get("target_crs", 4283))
+        srs.ImportFromEPSG(target_crs)
         dataset.SetProjection(srs.ExportToWkt())
         dataset.GetRasterBand(1).WriteArray(np.flipud(grid))
         dataset.FlushCache()

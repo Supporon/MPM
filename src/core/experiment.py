@@ -117,6 +117,7 @@ class Experiment:
             self.values["research_unit"],
             self.values["label"],
             len(deposits),
+            seed=self.spec.seed,
         )
         unlabelled = pipeline.extract(unlabelled_units).dropna().reset_index(drop=True)
         unlabelled = unlabelled.loc[:, deposits.columns]
@@ -241,14 +242,14 @@ class Experiment:
                 self._raw_prepared.feature_columns,
                 units=self._raw_prepared.xy_train_units,
             )
-            # 将基线中 PUB 先于留出划分的顺序保留为显式兼容组件。
-            training = self._apply_label_refinement(training)
+            # 先做 holdout 划分，再在训练集上执行 PUB，避免数据泄漏
             holdout = create_holdout(
                 self.spec.holdout.name, self.spec.holdout.params, self.spec.seed
             )
             split: SplitData = holdout.split(training, self.spec.holdout.params, self.spec.seed)
             training = split.train
             self._evaluation_data = split.test
+            training = self._apply_label_refinement(training)
             self.component_metadata["holdout"] = self.spec.holdout.name
 
         training = self._apply_knowledge_and_predicates(training)

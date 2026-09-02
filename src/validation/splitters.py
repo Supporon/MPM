@@ -6,7 +6,9 @@ import warnings
 from inspect import signature
 from typing import Any, Mapping
 
-from sklearn.model_selection import StratifiedKFold, train_test_split
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import GroupKFold, StratifiedKFold, train_test_split
 
 from ..core.contracts import SplitData, TrainingData
 from .registry import SPLITTER_REGISTRY
@@ -56,6 +58,261 @@ class StratifiedKFoldSplitter:
         if shuffle:
             kwargs["random_state"] = seed
         return StratifiedKFold(**kwargs)
+
+
+# ============================================================================
+# 空间交叉验证 — 空间块 K-Fold
+# ============================================================================
+
+
+def _extract_coords_from_data(data: TrainingData) -> np.ndarray:
+    """从 TrainingData 的 metadata["units"] 中提取 X/Y 坐标。
+
+    Returns:
+        shape (N, 2) 的坐标数组 [X, Y]。
+    Raises:
+        ValueError: 如果缺少坐标元数据。
+    """
+    units = data.metadata.get("units") if data.metadata else None
+    if units is None:
+        raise ValueError(
+            "Spatial splitter requires coordinate metadata. "
+            "Ensure TrainingData.metadata['units'] contains X/Y columns."
+        )
+    if isinstance(units, pd.DataFrame):
+        x_col = next((c for c in units.columns if c.upper() == "X"), None)
+        y_col = next((c for c in units.columns if c.upper() == "Y"), None)
+        if x_col and y_col:
+            return np.column_stack([units[x_col].to_numpy(), units[y_col].to_numpy()])
+    raise ValueError(
+        "Spatial splitter requires X/Y columns in the units metadata DataFrame."
+    )
+
+
+def _assign_spatial_blocks(
+    coords: np.ndarray, block_size_m: float
+) -> np.ndarray:
+    """将样本按空间坐标分配到网格块中。
+
+    每个样本被分配到一个整数 block_id，同一 block_id 的样本
+    在空间上属于同一个网格块。
+
+    Args:
+        coords: shape (N, 2) 的坐标数组 [X, Y]。
+        block_size_m: 网格块边长（米）。
+
+    Returns:
+        shape (N,) 的整数 block_id 数组。
+    """
+    x_coords = coords[:, 0]
+    y_coords = coords[:, 1]
+
+    # 计算每个样本所属的网格块索引
+    x_block = np.floor((x_coords - x_coords.min()) / block_size_m).astype(int)
+    y_block = np.floor((y_coords - y_coords.min()) / block_size_m).astype(int)
+
+    # 将二维块索引编码为一维 block_id
+    max_x = x_block.max() + 1
+    block_ids = y_block * max_x + x_block
+    return block_ids
+
+
+class _SpatialGroupKFold:
+    """基于空间块分组的 K-Fold 划分器。
+
+    将样本按空间块分组后，使用 GroupKFold 进行划分，
+    确保同一空间块的样本不会同时出现在 train 和 test 中。
+    """
+
+    def __init__(self, n_splits: int, block_ids: np.ndarray, shuffle: bool, random_state: int | None):
+        self.n_splits = n_splits
+        self.block_ids = block_ids
+        self.shuffle = shuffle
+        self.random_state = random_state
+
+    def split(self, X, y=None, groups=None):
+        """生成 (train_idx, test_idx) 迭代器。"""
+        gkf = GroupKFold(n_splits=self.n_splits)
+        # 如果 shuffle，先对块进行随机排列
+        if self.shuffle:
+            rng = np.random.default_rng(self.random_state)
+            unique_blocks = np.unique(self.block_ids)
+            shuffled = rng.permutation(unique_blocks)
+            mapping = {old: new for new, old in enumerate(shuffled)}
+            # 重新映射不会改变分组语义，但 GroupKFold 的块顺序影响 fold 分配
+            # 实际通过 shuffle 块索引来影响 fold 的组成
+            remapped = np.array([mapping[b] for b in self.block_ids])
+            yield from gkf.split(X, y, groups=remapped)
+        else:
+            yield from gkf.split(X, y, groups=self.block_ids)
+
+    def get_n_splits(self, X=None, y=None, groups=None):
+        return self.n_splits
+
+
+@SPLITTER_REGISTRY.decorator("spatial_block_kfold")
+class SpatialBlockKFoldSplitter:
+    """空间块 K-Fold 交叉验证。
+
+    基于空间坐标将样本分配到网格块中，使用 GroupKFold 按块划分，
+    确保每个 fold 的 train/test 在空间上分离。
+
+    参数:
+        n_splits: fold 数量，默认 5。
+        block_size_m: 空间块边长（米），默认 50000。
+        shuffle: 是否在划分前随机排列块，默认 True。
+    """
+
+    kind = "cross_validation"
+
+    @staticmethod
+    def validate_config(params: Mapping[str, Any]) -> None:
+        if int(params.get("n_splits", 5)) < 2:
+            raise ValueError("spatial_block_kfold n_splits must be at least 2")
+        if float(params.get("block_size_m", 50000)) <= 0:
+            raise ValueError("spatial_block_kfold block_size_m must be positive")
+
+    def build_cv(self, params: Mapping[str, Any], seed: int, data: TrainingData | None = None):
+        if data is None:
+            raise ValueError(
+                "spatial_block_kfold requires TrainingData to extract spatial coordinates. "
+                "Pass data= to build_cv()."
+            )
+        n_splits = int(params.get("n_splits", 5))
+        block_size_m = float(params.get("block_size_m", 50000))
+        shuffle = bool(params.get("shuffle", True))
+
+        coords = _extract_coords_from_data(data)
+        block_ids = _assign_spatial_blocks(coords, block_size_m)
+
+        unique_blocks = len(np.unique(block_ids))
+        if unique_blocks < n_splits:
+            warnings.warn(
+                f"spatial_block_kfold: only {unique_blocks} spatial blocks found, "
+                f"but n_splits={n_splits}. Reducing n_splits to {unique_blocks}.",
+                UserWarning,
+                stacklevel=2,
+            )
+            n_splits = max(2, unique_blocks)
+
+        return _SpatialGroupKFold(
+            n_splits=n_splits,
+            block_ids=block_ids,
+            shuffle=shuffle,
+            random_state=seed,
+        )
+
+
+# ============================================================================
+# 空间分组 K-Fold — 基于已有的 group_id
+# ============================================================================
+
+
+@SPLITTER_REGISTRY.decorator("spatial_group_kfold")
+class SpatialGroupKFoldSplitter:
+    """基于已有分组 ID 的空间交叉验证。
+
+    使用 TrainingData.metadata 中已有的 group_id（如矿集区/地质域）
+    作为分组依据，通过 GroupKFold 进行划分。
+
+    参数:
+        n_splits: fold 数量，默认 5。
+        group_column: metadata 中分组列的列名，默认 "group_id"。
+    """
+
+    kind = "cross_validation"
+
+    @staticmethod
+    def validate_config(params: Mapping[str, Any]) -> None:
+        if int(params.get("n_splits", 5)) < 2:
+            raise ValueError("spatial_group_kfold n_splits must be at least 2")
+
+    def build_cv(self, params: Mapping[str, Any], seed: int, data: TrainingData | None = None):
+        if data is None:
+            raise ValueError(
+                "spatial_group_kfold requires TrainingData with group metadata. "
+                "Pass data= to build_cv()."
+            )
+        n_splits = int(params.get("n_splits", 5))
+        group_column = str(params.get("group_column", "group_id"))
+
+        units = data.metadata.get("units") if data.metadata else None
+        if units is None or group_column not in units.columns:
+            raise ValueError(
+                f"spatial_group_kfold requires '{group_column}' column in "
+                "TrainingData.metadata['units'] DataFrame."
+            )
+
+        groups = units[group_column].to_numpy()
+        unique_groups = len(np.unique(groups))
+        if unique_groups < n_splits:
+            warnings.warn(
+                f"spatial_group_kfold: only {unique_groups} groups found, "
+                f"but n_splits={n_splits}. Reducing n_splits to {unique_groups}.",
+                UserWarning,
+                stacklevel=2,
+            )
+            n_splits = max(2, unique_groups)
+
+        return GroupKFold(n_splits=n_splits)
+
+
+# ============================================================================
+# 空间块留出法
+# ============================================================================
+
+
+@SPLITTER_REGISTRY.decorator("spatial_block_holdout")
+class SpatialBlockHoldoutSplitter:
+    """基于空间块的留出法划分。
+
+    将样本按空间坐标分配到网格块中，按块进行留出法划分，
+    确保测试集在空间上与训练集分离。
+
+    参数:
+        test_size: 测试集所占块的比例，默认 0.25。
+        block_size_m: 空间块边长（米），默认 50000。
+    """
+
+    kind = "holdout"
+
+    @staticmethod
+    def validate_config(params: Mapping[str, Any]) -> None:
+        test_size = float(params.get("test_size", 0.25))
+        if not 0 < test_size < 1:
+            raise ValueError("spatial_block_holdout test_size must be in (0, 1)")
+        if float(params.get("block_size_m", 50000)) <= 0:
+            raise ValueError("spatial_block_holdout block_size_m must be positive")
+
+    def split(self, data: TrainingData, params: Mapping[str, Any], seed: int) -> SplitData:
+        test_size = float(params.get("test_size", 0.25))
+        block_size_m = float(params.get("block_size_m", 50000))
+
+        coords = _extract_coords_from_data(data)
+        block_ids = _assign_spatial_blocks(coords, block_size_m)
+
+        unique_blocks = np.unique(block_ids)
+        rng = np.random.default_rng(seed)
+        rng.shuffle(unique_blocks)
+
+        n_test_blocks = max(1, int(len(unique_blocks) * test_size))
+        test_blocks = set(unique_blocks[:n_test_blocks])
+
+        test_idx = [i for i, b in enumerate(block_ids) if b in test_blocks]
+        train_idx = [i for i, b in enumerate(block_ids) if b not in test_blocks]
+
+        if len(test_idx) == 0:
+            raise ValueError(
+                "spatial_block_holdout: no samples in test set. "
+                "Try reducing block_size_m or test_size."
+            )
+        if len(train_idx) == 0:
+            raise ValueError(
+                "spatial_block_holdout: no samples in train set. "
+                "Try reducing block_size_m or test_size."
+            )
+
+        return SplitData(_take(data, train_idx), _take(data, test_idx))
 
 
 def _take(data: TrainingData, indices: list[int]) -> TrainingData:

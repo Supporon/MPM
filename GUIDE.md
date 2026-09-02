@@ -81,7 +81,7 @@ MPM_codex_phase2/
 ├── configs/                                  # 配置文件目录
 │   └── experiments/                          #   实验 YAML 配置
 │       ├── lachlan_rf_baseline.yaml          #     RF 基线回放（Lachlan，Phase1 格式）
-│       ├── lachlan_rf_phase2.yaml            #     RF + PUB + 调优（Lachlan，Phase2 格式）
+│       ├── lachlan_rf_phase2.yaml            #     RF 从归档特征重新训练（Lachlan，Phase2 格式）
 │       ├── lachlan_cnn.yaml                  #     CNN 模型训练 + 调优
 │       ├── lachlan_spe.yaml                  #     SPE 模型训练 + 调优
 │       ├── lachlan_spe_notune.yaml           #     SPE 模型训练（无调优，固定参数）
@@ -139,7 +139,7 @@ MPM_codex_phase2/
 │   │
 │   ├── predicates/                           # 谓词约束
 │   │   ├── pipeline.py                       #   谓词管线（顺序执行）
-│   │   ├── builtins.py                       #   谓词实现（仅 identity 占位）
+│   │   ├── builtins.py                       #   谓词实现（all_ones, spatial_box, spatial_distance, combined）
 │   │   └── registry.py                       #   PREDICATE_REGISTRY
 │   │
 │   └── utils/                                # 工具函数
@@ -267,9 +267,9 @@ value = metric_fn(labels, predictions, probabilities, sample_weight)
 | `TASK_REGISTRY` | 找矿任务 | `target_area_prediction`, `deep_edge_prediction`（占位） | `task.name` |
 | `TUNER_REGISTRY` | 调优器 | `none`, `bayes` | `tuning.name` |
 | `LABEL_REFINER_REGISTRY` | 标签细化 | `pub` | `label_refinement.name` |
-| `SPLITTER_REGISTRY` | 数据分拆 | `random_holdout`, `stratified_kfold` | `validation.holdout.name`, `validation.cross_validation.name` |
+| `SPLITTER_REGISTRY` | 数据分拆 | `random_holdout`, `stratified_kfold`, `spatial_block_kfold`, `spatial_group_kfold`, `spatial_block_holdout` | `validation.holdout.name`, `validation.cross_validation.name` |
 | `METRIC_REGISTRY` | 评估指标 | `accuracy`, `precision`, `recall`, `f1`, `roc_auc`, `confusion_matrix` | `validation.metrics[]`, `validation.primary_metric` |
-| `PREDICATE_REGISTRY` | 谓词约束 | `identity` | `predicates.items[].name` |
+| `PREDICATE_REGISTRY` | 谓词约束 | `all_ones`, `spatial_box`, `spatial_distance`, `combined` | `predicates.items[].name` |
 | `KNOWLEDGE_REGISTRY` | 知识注入 | `empty` | `knowledge.items[].name` |
 
 ### 4.5 配置加载流程
@@ -324,7 +324,7 @@ python run.py --config configs/experiments/lachlan_rf_phase2.yaml --validate-onl
 # 输出 JSON 格式的组件概览
 # {
 #   "experiment": "lachlan_rf_phase2_test",
-#   "execution_mode": "archive_replay",
+#   "execution_mode": "train_from_archive_features",
 #   "task": "target_area_prediction",
 #   "feature_operators": ["raster_statistics", "texture", ...],
 #   "model": "rf",
@@ -371,6 +371,10 @@ python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
 - `"123"` → `123`（int）
 - `"0.5"` → `0.5`（float）
 - 其他 → 保持字符串
+
+**重要限制：**
+- `--set` **不支持列表值或 JSON 值**（如 `'features.operators=[{...}]'`），请使用专用 YAML 配置文件
+- `--set` **不支持列表索引路径**（如 `predicates.items.0.name=xxx`），请使用专用 YAML 配置文件
 
 **重要行为：**
 - 原 YAML 文件不会被修改，覆盖只在内存中生效
@@ -985,9 +989,9 @@ TrainingData
 
 以下是完整的实验对比类型及对应的 shell 命令示例。假设基准配置为 `lachlan_rf_phase2.yaml`。
 
-### 9.1 不同模型对比（固定参数，无调优）
+### 9.1 不同模型对比（各自固定配置，无调优）
 
-**目的：** 比较不同模型在相同数据、相同参数下的性能差异。
+**目的：** 比较不同模型在各自默认参数下的性能差异。不同模型的参数空间不同，因此各自使用其推荐配置而非统一参数。
 
 ```bash
 # RF 固定参数
@@ -1036,9 +1040,9 @@ for seed in 42 123 456 789 2026; do
 done
 ```
 
-### 9.4 相同模型不同研究单元实验
+### 9.4 不同预测网格尺度实验
 
-**目的：** 比较不同研究单元构建方式对预测结果的影响。
+**目的：** 比较不同预测网格精度对预测结果的影响。
 
 ```bash
 # 默认网格精度 0.05
@@ -1057,9 +1061,9 @@ python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
     experiment.name=ru_grid_0025
 ```
 
-### 9.5 相同模型不同标签策略实验
+### 9.5 不同样本权重策略实验
 
-**目的：** 比较不同标签权重设置对模型的影响。
+**目的：** 比较不同样本权重设置对模型的影响。
 
 ```bash
 # 默认权重（VLG=0.5, LGE=0.4, MED=0.3, SML=0.2, OCC=0.1, unlabeled=0.5）
@@ -1094,17 +1098,16 @@ python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
 python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
     --set tuning.name=none predicates.enabled=false experiment.name=pred_none
 
-# 使用 identity 谓词（验证链路）
+# 使用 all_ones 谓词（验证链路，不做任何变换）
+# 注意：--set 不支持列表索引路径，请使用专用 YAML 配置文件
+# 参见 configs/experiments/ 目录下的谓词配置示例
 python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
     --set tuning.name=none predicates.enabled=true \
-    predicates.items.0.name=identity \
-    experiment.name=pred_identity
+    experiment.name=pred_all_ones
 
-# 使用自定义谓词（需要先注册）
+# 使用自定义谓词（需要先注册，在专用 YAML 中配置）
 python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
     --set tuning.name=none predicates.enabled=true \
-    predicates.items.0.name=positive_constraint \
-    predicates.items.0.params.feature=Intrusions_Tabberabberan \
     experiment.name=pred_intrusion_constraint
 ```
 
@@ -1137,49 +1140,45 @@ python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
 
 **目的：** 比较同一知识的不同使用方式。
 
+**注意：** 以下示例中 `favorable_zone`、`positive_constraint`、`weight_adjustment` 均为 GUIDE 中展示的示例组件，尚未内置注册。知识→模型约束（方式三）当前未实现，需要用户在 `src/predicates/builtins.py` 中自行注册谓词后方可使用。
+
 ```bash
-# 方式一：知识→谓词（筛选样本）
+# 方式一：知识→谓词（筛选样本）— 需要先注册谓词
 python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
     --set tuning.name=none \
-    knowledge.enabled=true knowledge.items.0.name=favorable_zone \
-    predicates.enabled=true predicates.items.0.name=positive_constraint \
+    knowledge.enabled=true \
+    predicates.enabled=true \
     experiment.name=knowledge_use_filter
 
-# 方式二：知识→谓词（加权调整）
+# 方式二：知识→谓词（加权调整）— 需要先注册谓词
 python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
     --set tuning.name=none \
-    knowledge.enabled=true knowledge.items.0.name=favorable_zone \
-    predicates.enabled=true predicates.items.0.name=weight_adjustment \
+    knowledge.enabled=true \
+    predicates.enabled=true \
     experiment.name=knowledge_use_weight
 
-# 方式三：知识→模型约束（通过 constraints）
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none \
-    knowledge.enabled=true knowledge.items.0.name=favorable_zone \
-    predicates.enabled=true predicates.items.0.name=positive_constraint \
-    experiment.name=knowledge_use_constraint
+# 方式三：知识→模型约束（通过 constraints）— 当前未实现
+# 需要在模型中实现 constraints 支持后使用
 ```
 
 ### 9.9 相同模型不同特征算子实验
 
 **目的：** 比较不同特征集对预测性能的影响。
 
+**注意：** `--set` 不支持列表/JSON 值。要更换特征算子集，请创建专用 YAML 配置文件（如 `configs/experiments/lachlan_rf_feat_geology.yaml`），在其中修改 `features.operators` 列表。
+
 ```bash
 # 全部特征（基线）
 python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
     --set tuning.name=none experiment.name=feat_all
 
-# 仅地质+线距离特征
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none \
-    'features.operators=[{"name":"line_distance","params":{"distance_type":"geodesic"}},{"name":"categorical_geology","params":{}}]' \
-    experiment.name=feat_geology_only
+# 仅地质+线距离特征 — 使用专用 YAML 配置
+python run.py --config configs/experiments/lachlan_rf_feat_geology.yaml \
+    --set tuning.name=none experiment.name=feat_geology_only
 
-# 仅地球物理特征
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none \
-    'features.operators=[{"name":"raster_statistics","params":{"buffer_size":10,"buffer_shape":"square"}},{"name":"texture","params":{"buffer_size":10}},{"name":"elevation_gradient","params":{"buffer_size":10,"buffer_shape":"square"}}]' \
-    experiment.name=feat_geophysics_only
+# 仅地球物理特征 — 使用专用 YAML 配置
+python run.py --config configs/experiments/lachlan_rf_feat_geophysics.yaml \
+    --set tuning.name=none experiment.name=feat_geophysics_only
 ```
 
 ### 9.10 相同模型不同预处理参数实验
@@ -1336,11 +1335,9 @@ echo "Running all features..."
 python run.py --config "$BASE_CONFIG" \
     --set $BASE_SET model.name=rf experiment.name="batch_feat_all"
 
-echo "Running geology only..."
-python run.py --config "$BASE_CONFIG" \
-    --set $BASE_SET model.name=rf \
-    'features.operators=[{"name":"line_distance","params":{"distance_type":"geodesic"}},{"name":"categorical_geology","params":{}}]' \
-    experiment.name="batch_feat_geology"
+echo "Running geology only (use dedicated YAML config)..."
+python run.py --config configs/experiments/lachlan_rf_feat_geology.yaml \
+    --set $BASE_SET model.name=rf experiment.name="batch_feat_geology"
 
 echo "=== 4. 不同标签权重 ==="
 echo "Running default weights..."
@@ -1363,11 +1360,11 @@ echo "Results are in outputs/ directory"
 
 | 编号 | 对比类型 | 变动的 YAML 配置节 | 示例命令节 |
 |:----:|---------|-------------------|:--:|
-| 1 | 不同模型对比（固定参数） | `model.name` | 9.1 |
+| 1 | 不同模型对比（各自固定配置） | `model.name` | 9.1 |
 | 2 | 不同模型对比（带调优） | `model.name` + `tuning.*` | 9.2 |
 | 3 | 相同模型多种子 | `experiment.seed` | 9.3 |
-| 4 | 不同研究单元 | `research_unit.*` | 9.4 |
-| 5 | 不同标签策略 | `label.sample_weight.*` | 9.5 |
+| 4 | 不同预测网格尺度 | `research_unit.*` | 9.4 |
+| 5 | 不同样本权重策略 | `label.sample_weight.*` | 9.5 |
 | 6 | 不同谓词约束 | `predicates.*` | 9.6 |
 | 7 | 不同知识注入 | `knowledge.*` | 9.7 |
 | 8 | 知识+谓词不同组合方式 | `knowledge.*` + `predicates.*` | 9.8 |
@@ -1529,6 +1526,31 @@ pip install pulearn          # PUB 标签细化
 # 输出目录格式：outputs/<实验名>_YYYYMMDD_HHMMSS/
 # 可以通过 experiment.name 区分不同实验
 python run.py --config ... --set experiment.name=my_unique_name
+```
+
+### 空间泄漏风险
+
+使用 `random_holdout` 分拆器时，训练集和测试集的样本可能在空间上相邻或重叠，导致**空间泄漏（spatial leakage）**，使评估指标过于乐观。框架已内置空间交叉验证分拆器来解决此问题：
+
+```bash
+# 使用空间块留出法（推荐替换 random_holdout）
+python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
+    --set validation.holdout.name=spatial_block_holdout \
+    validation.holdout.params.block_size_m=50000
+
+# 使用空间块 K-Fold 交叉验证
+python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
+    --set validation.cross_validation.name=spatial_block_kfold \
+    validation.cross_validation.params.block_size_m=50000
+
+# 使用已有分组 ID 的空间分组 K-Fold（如矿集区/地质域）
+python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
+    --set validation.cross_validation.name=spatial_group_kfold \
+    validation.cross_validation.params.group_column=group_id
+```
+
+**空间分拆器要求** `TrainingData.metadata["units"]` 中包含 X/Y 坐标列。如果使用 `raw_gis` 模式，这些坐标会自动包含；如果使用 `train_from_archive_features` 模式，需要确保归档数据中包含坐标元数据。
+
 ```
 
 ### 如何确认 config_resolved.yaml 是最终参数

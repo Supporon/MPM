@@ -2,7 +2,7 @@ experiment:
   name: lachlan_rf_phase2_test
   seed: 2026
   output_dir: outputs/lachlan_rf_phase2_test
-  execution_mode: archive_replay
+  execution_mode: train_from_archive_features
   variant: baseline
 task:
   name: target_area_prediction
@@ -87,7 +87,6 @@ model:
   name: rf
   params:
     n_jobs: -1
-    random_state: 42
 validation:
   holdout:
     name: random_holdout

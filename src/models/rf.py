@@ -29,7 +29,7 @@ class RandomForestAdapter:
     def build(self, params: Mapping[str, Any], seed: int) -> RandomForestClassifier:
         resolved = dict(params)
         resolved.setdefault("n_jobs", -1)
-        resolved.setdefault("random_state", seed)
+        resolved["random_state"] = seed  # 直接覆盖，确保实验种子贯通
         return RandomForestClassifier(**resolved)
 
     def fit_params(self, data: TrainingData) -> Mapping[str, Any]:

@@ -1,9 +1,8 @@
 experiment:
-  name: lachlan_rf_baseline
+  name: lachlan_rf_train
   seed: 42
-  output_dir: outputs/lachlan_rf_baseline
-  # 安全默认值：保留归档基线，不重新训练。
-  execution_mode: archive_replay
+  output_dir: outputs/lachlan_rf_train
+  execution_mode: train_from_archive_features
 
 task:
   name: target_area_prediction
@@ -14,7 +13,6 @@ dataset:
   archive_dir: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Outputs_Cu_Lachlan_v1.6
   occurrence: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Mineral Occurrences/MinView/GSNSWDataset/porphyry.shp
   boundary: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Frames/Lachlan_Boundary_edited.shp
-  # 保持 Notebook 行为：以 Lachlan 为预测目标，随机未标注样本则使用 NSW 范围。
   training_boundary: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Frames/NSW_Boundary/NSW_STATE_POLYGON_shp_GDA94_NoIsland_ACT.shp
   geology:
     line_files:
@@ -63,12 +61,23 @@ label:
     unlabeled: 0.5
 
 features:
-  line_distance: true
-  categorical: true
-  raster_statistics: true
-  texture: true
-  gradient: true
-  buffer_size: 10
+  operators:
+    - name: raster_statistics
+      params:
+        buffer_size: 10
+        buffer_shape: square
+    - name: texture
+      params:
+        buffer_size: 10
+    - name: elevation_gradient
+      params:
+        buffer_size: 10
+        buffer_shape: square
+    - name: line_distance
+      params:
+        distance_type: geodesic
+    - name: categorical_geology
+      params: {}
 
 preprocess:
   correlation_threshold: 0.7
@@ -79,26 +88,40 @@ model:
   name: rf
   params:
     n_jobs: -1
-  pu:
-    enabled: true
-  search:
-    enabled: true
-    n_iter: 100
-    space:
-      bootstrap: [true, false]
-      max_depth: [5, 20]
-      max_features: [null, sqrt, log2]
-      min_samples_leaf: [2, 20]
-      min_samples_split: [2, 30]
-      n_estimators: [10, 200]
+
+tuning:
+  name: none
+  params: {}
+
+label_refinement:
+  enabled: false
+
+knowledge:
+  enabled: false
+
+predicates:
+  enabled: false
 
 validation:
-  split: random
-  test_size: 0.25
-  cv: 10
-  scoring: f1
+  holdout:
+    name: random_holdout
+    params:
+      test_size: 0.25
+  cross_validation:
+    name: stratified_kfold
+    params:
+      n_splits: 10
+      shuffle: false
+  metrics:
+    - accuracy
+    - precision
+    - recall
+    - f1
+    - confusion_matrix
+    - roc_auc
+  primary_metric: f1
 
 prediction:
   score_type: probability
   normalization: minmax
-  export_geotiff: true
+  export_geotiff: false

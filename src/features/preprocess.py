@@ -76,85 +76,134 @@ class BaselinePreprocessor:
         unlabeled: pd.DataFrame,
         unit_columns: tuple[str, ...] | list[str] = ("X", "Y"),
     ) -> PreparedTrainingData:
-        """按照 Notebook 语义筛选、编码、缩放并切分原始单元。"""
-        warnings.warn(
-            "Baseline compatibility: correlation filtering is performed before the split.",
-            UserWarning,
-            stacklevel=2,
-        )
+        """按照 Notebook 语义筛选、编码、缩放并切分原始单元。
+
+        与旧版基线实现的关键区别：相关性筛选和 OneHotEncoder 拟合
+        现在在训练/测试划分之后执行，仅在训练集上拟合，避免数据泄漏。
+        """
         training = pd.concat([deposits, unlabeled], ignore_index=True)
         numerical, categorical = split_feature_columns(training, unit_columns)
-        correlation = training[numerical].corr(method="spearman").abs()
+
+        # 先划分正样本为训练/测试集
+        pos_mask = training["label"] == 1
+        positives = training.loc[pos_mask].reset_index(drop=True)
+        unlabelled_all = training.loc[~pos_mask].reset_index(drop=True)
+        pos_train, pos_test = train_test_split(
+            positives, train_size=0.75, random_state=self.seed
+        )
+
+        # 训练集 = pos_train + 全部未标注样本
+        train_set = pd.concat([pos_train, unlabelled_all], ignore_index=True)
+
+        # 仅在训练集上计算相关性
+        correlation = train_set[numerical].corr(method="spearman").abs()
         upper = correlation.where(np.triu(np.ones(correlation.shape), k=1).astype(bool))
-        dropped = [column for column in upper.columns if any(upper[column] > self.config["correlation_threshold"])]
+        dropped = [
+            column for column in upper.columns
+            if any(upper[column] > self.config["correlation_threshold"])
+        ]
         self.numerical_columns = [column for column in numerical if column not in dropped]
         self.categorical_columns = categorical
         self.correlation = correlation
 
+        # 仅在训练集上拟合 OneHotEncoder
         if categorical:
-            encoded = self.encoder.fit_transform(training[categorical]).toarray()
+            encoded_train = self.encoder.fit_transform(train_set[categorical]).toarray()
+            encoded_test = self.encoder.transform(pos_test[categorical]).toarray()
             self.encoder_fitted = True
             try:
                 encoded_columns = self.encoder.get_feature_names(categorical).tolist()
             except AttributeError:
                 encoded_columns = self.encoder.get_feature_names_out(categorical).tolist()
-            encoded_frame = pd.DataFrame(encoded, columns=encoded_columns)
         else:
+            encoded_train = np.empty((len(train_set), 0))
+            encoded_test = np.empty((len(pos_test), 0))
             encoded_columns = []
-            encoded_frame = pd.DataFrame(index=training.index)
-        combined = pd.concat(
-            [training[self.numerical_columns].reset_index(drop=True), encoded_frame,
-             training[["sample_weight", "label"]].reset_index(drop=True)],
+
+        # 构建训练集 DataFrame
+        train_combined = pd.concat(
+            [
+                train_set[self.numerical_columns].reset_index(drop=True),
+                pd.DataFrame(encoded_train, columns=encoded_columns),
+                train_set[["sample_weight", "label"]].reset_index(drop=True),
+            ],
             axis=1,
         )
-        positives = combined.loc[combined["label"] == 1].reset_index(drop=True)
-        unlabelled = combined.loc[combined["label"] == 0].reset_index(drop=True)
+        train_pos = train_combined.loc[train_combined["label"] == 1].reset_index(drop=True)
+        train_unlabelled = train_combined.loc[train_combined["label"] == 0].reset_index(drop=True)
+
+        # 构建测试集 DataFrame
+        test_combined = pd.concat(
+            [
+                pos_test[self.numerical_columns].reset_index(drop=True),
+                pd.DataFrame(encoded_test, columns=encoded_columns),
+                pos_test[["sample_weight", "label"]].reset_index(drop=True),
+            ],
+            axis=1,
+        )
+
+        # 单元元数据
         available_unit_columns = [column for column in unit_columns if column in training.columns]
         units = training[available_unit_columns].reset_index(drop=True)
-        positive_units = units.loc[combined["label"] == 1].reset_index(drop=True)
-        unlabelled_units = units.loc[combined["label"] == 0].reset_index(drop=True)
-        features = [column for column in combined.columns if column != "label"]
-        pos_train, pos_test = train_test_split(
-            positives[features], train_size=0.75, random_state=self.seed
-        )
+        positive_units = units.loc[pos_mask].reset_index(drop=True)
+        train_pos_units = positive_units.loc[pos_train.index].reset_index(drop=True)
+        test_pos_units = positive_units.loc[pos_test.index].reset_index(drop=True)
+        unlabelled_units = units.loc[~pos_mask].reset_index(drop=True)
+
+        features = [column for column in train_combined.columns if column != "label"]
+
         xy_train_original = pd.concat(
-            [pos_train.reset_index(drop=True), unlabelled[features].reset_index(drop=True)],
+            [
+                train_pos[features].reset_index(drop=True),
+                train_unlabelled[features].reset_index(drop=True),
+            ],
             ignore_index=True,
         )
         xy_train_original["label"] = pd.concat(
-            [positives.loc[pos_train.index, "label"].reset_index(drop=True), unlabelled["label"]],
+            [
+                train_pos["label"].reset_index(drop=True),
+                train_unlabelled["label"].reset_index(drop=True),
+            ],
             ignore_index=True,
         )
         xy_train_units = pd.concat(
             [
-                positive_units.loc[pos_train.index].reset_index(drop=True),
+                train_pos_units.reset_index(drop=True),
                 unlabelled_units.reset_index(drop=True),
             ],
             ignore_index=True,
         )
-        xy_pos_test_units = positive_units.loc[pos_test.index].reset_index(drop=True)
-        # 与当前 Notebook 一致，此处仅拟合训练数据。
+        xy_pos_test_units = test_pos_units.reset_index(drop=True)
+
+        # 仅在训练集上拟合 StandardScaler
         if self.numerical_columns:
             scaled_train = self.scaler.fit_transform(xy_train_original[self.numerical_columns])
-            scaled_test = self.scaler.transform(pos_test[self.numerical_columns])
+            scaled_test = self.scaler.transform(test_combined[self.numerical_columns])
             self.scaler_fitted = True
         else:
             scaled_train = np.empty((len(xy_train_original), 0))
-            scaled_test = np.empty((len(pos_test), 0))
+            scaled_test = np.empty((len(test_combined), 0))
+
         xy_train = pd.concat(
-            [pd.DataFrame(scaled_train, columns=self.numerical_columns),
-             xy_train_original[encoded_columns].reset_index(drop=True),
-             xy_train_original[["sample_weight", "label"]].reset_index(drop=True)],
+            [
+                pd.DataFrame(scaled_train, columns=self.numerical_columns),
+                xy_train_original[encoded_columns].reset_index(drop=True),
+                xy_train_original[["sample_weight", "label"]].reset_index(drop=True),
+            ],
             axis=1,
         )
         xy_pos_test = pd.concat(
-            [pd.DataFrame(scaled_test, columns=self.numerical_columns),
-             pos_test[encoded_columns].reset_index(drop=True),
-             pos_test[["sample_weight"]].reset_index(drop=True),
-             positives.loc[pos_test.index, ["label"]].reset_index(drop=True)],
+            [
+                pd.DataFrame(scaled_test, columns=self.numerical_columns),
+                test_combined[encoded_columns].reset_index(drop=True),
+                test_combined[["sample_weight"]].reset_index(drop=True),
+                test_combined[["label"]].reset_index(drop=True),
+            ],
             axis=1,
         )
-        self.feature_columns = [column for column in xy_train.columns if column not in {"sample_weight", "label"}]
+        self.feature_columns = [
+            column for column in xy_train.columns if column not in {"sample_weight", "label"}
+        ]
         return PreparedTrainingData(
             xy_train,
             xy_pos_test,
@@ -165,23 +214,42 @@ class BaselinePreprocessor:
         )
 
     def transform_target_legacy(self, target_data: pd.DataFrame) -> pd.DataFrame:
-        """复刻 Notebook 在目标侧执行 ``scaler.fit`` 的行为。
+        """对目标数据应用与训练集相同的预处理变换。
 
-        TODO(science)：只有在经过有意版本化的科学实验后，才应将其改为
-        ``scaler.transform``，不应在迁移过程中修改。
+        使用已拟合的 Scaler 和 OneHotEncoder 进行 transform（不再重新 fit）。
+
+        TODO(science)：旧版基线实现在目标侧执行 ``scaler.fit_transform``，
+        现已修复为 ``scaler.transform``。通过实验种子确保可复现性。
         """
-        warnings.warn(
-            "Baseline compatibility: refitting StandardScaler on target features before transform.",
-            UserWarning,
-            stacklevel=2,
-        )
-        if self.numerical_columns:
-            target_numeric = self.scaler.fit_transform(target_data[self.numerical_columns])
+        if self.scaler_fitted:
+            if self.numerical_columns:
+                target_numeric = self.scaler.transform(target_data[self.numerical_columns])
+            else:
+                target_numeric = np.empty((len(target_data), 0))
         else:
-            target_numeric = np.empty((len(target_data), 0))
-        if self.categorical_columns:
-            target_categorical = self.encoder.transform(target_data[self.categorical_columns]).toarray()
+            warnings.warn(
+                "Scaler not fitted during training; falling back to fit_transform on target data.",
+                UserWarning,
+                stacklevel=2,
+            )
+            if self.numerical_columns:
+                target_numeric = self.scaler.fit_transform(target_data[self.numerical_columns])
+            else:
+                target_numeric = np.empty((len(target_data), 0))
+        if self.encoder_fitted:
+            if self.categorical_columns:
+                target_categorical = self.encoder.transform(target_data[self.categorical_columns]).toarray()
+            else:
+                target_categorical = np.empty((len(target_data), 0))
         else:
-            target_categorical = np.empty((len(target_data), 0))
+            warnings.warn(
+                "Encoder not fitted during training; falling back to fit_transform on target data.",
+                UserWarning,
+                stacklevel=2,
+            )
+            if self.categorical_columns:
+                target_categorical = self.encoder.fit_transform(target_data[self.categorical_columns]).toarray()
+            else:
+                target_categorical = np.empty((len(target_data), 0))
         target = np.hstack((target_numeric, target_categorical))
         return pd.DataFrame(target, columns=self.feature_columns)

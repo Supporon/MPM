@@ -33,19 +33,32 @@ def build_positive_units(occurrence_path: str, label_config: Mapping[str, Any]) 
     ).reset_index(drop=True)
 
 
-def sample_unlabeled_units(boundary_path: str, count: int, label_config: Mapping[str, Any]) -> pd.DataFrame:
-    """复刻 Notebook 在边界内执行的不设随机种子的均匀采样。
+def sample_unlabeled_units(
+    boundary_path: str, count: int, label_config: Mapping[str, Any], seed: int | None = None
+) -> pd.DataFrame:
+    """在边界内执行均匀采样，返回未标注点。
+
+    Parameters
+    ----------
+    boundary_path : str
+        边界 Shapefile 路径。
+    count : int
+        待生成的未标注样本数量。
+    label_config : Mapping[str, Any]
+        标签配置，包含 sample_weight 映射。
+    seed : int or None
+        随机种子，用于确保可复现性。若为 None，使用全局 numpy 随机状态。
 
     TODO(science)：未使用正例排除缓冲区或经验证的无矿区掩膜。
-    为复刻 Notebook，此处有意使用全局 numpy 随机数生成器。
     """
     boundary = load_vector(boundary_path)
     if boundary.empty:
         raise ValueError("Boundary vector contains no geometry")
     geometry = boundary.geometry.iloc[0]
     min_x, min_y, max_x, max_y = geometry.bounds
-    candidates_x = np.random.uniform(low=min_x, high=max_x, size=count * 2)
-    candidates_y = np.random.uniform(low=min_y, high=max_y, size=count * 2)
+    rng = np.random.default_rng(seed) if seed is not None else np.random.default_rng()
+    candidates_x = rng.uniform(low=min_x, high=max_x, size=count * 2)
+    candidates_y = rng.uniform(low=min_y, high=max_y, size=count * 2)
     accepted_x: list[float] = []
     accepted_y: list[float] = []
     try:
