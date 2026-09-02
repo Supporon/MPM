@@ -89,6 +89,26 @@ def _extract_coords_from_data(data: TrainingData) -> np.ndarray:
     )
 
 
+def _looks_like_degrees(x: np.ndarray, y: np.ndarray) -> bool:
+    """启发式判断坐标是否为十进制经纬度（度）。
+
+    投影坐标（如 UTM，单位米）通常 x 可达数十万/数百万、或超出
+    [-180, 180]，而经纬度 x∈[-180,180]、y∈[-90,90]。用于在
+    空间分块前给出明确错误，避免以米为单位的 block_size 把全部
+    经纬度样本归入同一个块。
+    """
+    finite_x = x[np.isfinite(x)]
+    finite_y = y[np.isfinite(y)]
+    if len(finite_x) == 0 or len(finite_y) == 0:
+        return False
+    return bool(
+        finite_x.min() >= -180
+        and finite_x.max() <= 180
+        and finite_y.min() >= -90
+        and finite_y.max() <= 90
+    )
+
+
 def _assign_spatial_blocks(
     coords: np.ndarray, block_size_m: float
 ) -> np.ndarray:
@@ -107,6 +127,13 @@ def _assign_spatial_blocks(
     x_coords = coords[:, 0]
     y_coords = coords[:, 1]
 
+    if _looks_like_degrees(x_coords, y_coords):
+        raise ValueError(
+            "spatial block splitting requires projected coordinates (meters), "
+            "but X/Y appear to be in decimal degrees. Reproject the data to a "
+            "metric CRS (e.g. UTM) before using spatial_block_kfold."
+        )
+
     # 计算每个样本所属的网格块索引
     x_block = np.floor((x_coords - x_coords.min()) / block_size_m).astype(int)
     y_block = np.floor((y_coords - y_coords.min()) / block_size_m).astype(int)
@@ -117,34 +144,32 @@ def _assign_spatial_blocks(
     return block_ids
 
 
-class _SpatialGroupKFold:
-    """基于空间块分组的 K-Fold 划分器。
+class _GroupKFoldWithGroups:
+    """GroupKFold 包装器，把预计算的 group 数组固化。
 
-    将样本按空间块分组后，使用 GroupKFold 进行划分，
-    确保同一空间块的样本不会同时出现在 train 和 test 中。
+    调用方（如 BayesSearchCV）通常只调用 ``split(X, y)`` 而不传
+    ``groups``，本包装器在内部注入固化的 group 数组，避免
+    ``The 'groups' parameter should not be None`` 错误。
     """
 
-    def __init__(self, n_splits: int, block_ids: np.ndarray, shuffle: bool, random_state: int | None):
+    def __init__(self, n_splits: int, groups: np.ndarray, shuffle: bool, random_state: int | None):
         self.n_splits = n_splits
-        self.block_ids = block_ids
+        self.groups = np.asarray(groups)
         self.shuffle = shuffle
         self.random_state = random_state
 
     def split(self, X, y=None, groups=None):
         """生成 (train_idx, test_idx) 迭代器。"""
         gkf = GroupKFold(n_splits=self.n_splits)
+        resolved = self.groups
         # 如果 shuffle，先对块进行随机排列
         if self.shuffle:
             rng = np.random.default_rng(self.random_state)
-            unique_blocks = np.unique(self.block_ids)
-            shuffled = rng.permutation(unique_blocks)
+            unique = np.unique(self.groups)
+            shuffled = rng.permutation(unique)
             mapping = {old: new for new, old in enumerate(shuffled)}
-            # 重新映射不会改变分组语义，但 GroupKFold 的块顺序影响 fold 分配
-            # 实际通过 shuffle 块索引来影响 fold 的组成
-            remapped = np.array([mapping[b] for b in self.block_ids])
-            yield from gkf.split(X, y, groups=remapped)
-        else:
-            yield from gkf.split(X, y, groups=self.block_ids)
+            resolved = np.array([mapping[g] for g in self.groups])
+        yield from gkf.split(X, y, groups=resolved)
 
     def get_n_splits(self, X=None, y=None, groups=None):
         return self.n_splits
@@ -186,6 +211,12 @@ class SpatialBlockKFoldSplitter:
         block_ids = _assign_spatial_blocks(coords, block_size_m)
 
         unique_blocks = len(np.unique(block_ids))
+        if unique_blocks < 2:
+            raise ValueError(
+                f"spatial_block_kfold found only {unique_blocks} spatial block. "
+                "Reduce block_size_m, or ensure coordinates are in a projected "
+                "(metric) CRS so samples span more than one block."
+            )
         if unique_blocks < n_splits:
             warnings.warn(
                 f"spatial_block_kfold: only {unique_blocks} spatial blocks found, "
@@ -193,11 +224,11 @@ class SpatialBlockKFoldSplitter:
                 UserWarning,
                 stacklevel=2,
             )
-            n_splits = max(2, unique_blocks)
+            n_splits = unique_blocks
 
-        return _SpatialGroupKFold(
+        return _GroupKFoldWithGroups(
             n_splits=n_splits,
-            block_ids=block_ids,
+            groups=block_ids,
             shuffle=shuffle,
             random_state=seed,
         )
@@ -245,6 +276,11 @@ class SpatialGroupKFoldSplitter:
 
         groups = units[group_column].to_numpy()
         unique_groups = len(np.unique(groups))
+        if unique_groups < 2:
+            raise ValueError(
+                f"spatial_group_kfold found only {unique_groups} group(s) in "
+                f"column '{group_column}'; need at least 2 groups to split."
+            )
         if unique_groups < n_splits:
             warnings.warn(
                 f"spatial_group_kfold: only {unique_groups} groups found, "
@@ -252,9 +288,14 @@ class SpatialGroupKFoldSplitter:
                 UserWarning,
                 stacklevel=2,
             )
-            n_splits = max(2, unique_groups)
+            n_splits = unique_groups
 
-        return GroupKFold(n_splits=n_splits)
+        return _GroupKFoldWithGroups(
+            n_splits=n_splits,
+            groups=groups,
+            shuffle=False,
+            random_state=seed,
+        )
 
 
 # ============================================================================

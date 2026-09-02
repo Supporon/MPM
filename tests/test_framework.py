@@ -906,6 +906,46 @@ class FrameworkTests(unittest.TestCase):
             f"Train and test spatial blocks overlap: {train_blocks & test_blocks}"
         )
 
+    def test_spatial_group_kfold_injects_groups_without_explicit_arg(self) -> None:
+        """P0-4: spatial_group_kfold 返回的 CV 无需调用方显式传 groups。"""
+        data = TrainingData(
+            pd.DataFrame({"a": np.arange(12, dtype=float)}),
+            pd.Series([0, 1] * 6),
+            pd.Series(np.ones(12)),
+            metadata={
+                "units": pd.DataFrame({
+                    "X": np.arange(12, dtype=float),
+                    "Y": np.arange(12, dtype=float),
+                    "group_id": [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2],
+                })
+            },
+        )
+        splitter = SPLITTER_REGISTRY.create("spatial_group_kfold")
+        cv = splitter.build_cv({"n_splits": 3, "group_column": "group_id"}, 42, data)
+        folds = list(cv.split(data.features, data.labels))  # 不传 groups 也应成功
+        self.assertEqual(len(folds), 3)
+        for train_idx, test_idx in folds:
+            train_groups = set(data.metadata["units"].iloc[train_idx]["group_id"])
+            test_groups = set(data.metadata["units"].iloc[test_idx]["group_id"])
+            self.assertTrue(train_groups.isdisjoint(test_groups))
+
+    def test_spatial_block_kfold_rejects_degree_coordinates(self) -> None:
+        """P0-4: 经纬度坐标下 spatial_block_kfold 给出明确错误而非单块。"""
+        data = TrainingData(
+            pd.DataFrame({"a": np.arange(6, dtype=float)}),
+            pd.Series([0, 1] * 3),
+            pd.Series(np.ones(6)),
+            metadata={
+                "units": pd.DataFrame({
+                    "X": [147.0, 147.1, 147.2, 147.3, 147.4, 147.5],
+                    "Y": [-35.0, -35.1, -35.2, -35.3, -35.4, -35.5],
+                })
+            },
+        )
+        splitter = SPLITTER_REGISTRY.create("spatial_block_kfold")
+        with self.assertRaisesRegex(ValueError, "decimal degrees"):
+            splitter.build_cv({"n_splits": 2, "block_size_m": 50000}, 42, data)
+
     def test_deep_edge_task_is_registered_but_explicitly_unavailable(self) -> None:
         with self.assertRaises(TaskCapabilityError):
             create_task(

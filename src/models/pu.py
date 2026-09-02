@@ -84,7 +84,7 @@ class LegacyPubRelabeler:
             search_space,
             n_iter=int(params.get("n_iter", 100)),
             scoring=validation_config["primary_metric"],
-            cv=build_cv(cv_config["name"], cv_config.get("params", {}), seed),
+            cv=build_cv(cv_config["name"], cv_config.get("params", {}), seed, data),
             n_jobs=int(params.get("n_jobs", -1)),
             random_state=seed,
             verbose=0,
