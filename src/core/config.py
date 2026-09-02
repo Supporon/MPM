@@ -527,6 +527,12 @@ def _validate_mode_capabilities(config: Mapping[str, Any]) -> None:
                 "train_from_archive_features mode uses archived features; feature "
                 "operators do not execute. Set features.operators=[] or use raw_gis mode."
             )
+        if config["validation"]["holdout"]["name"] != "random_holdout":
+            raise ConfigError(
+                "train_from_archive_features mode uses the archive's precomputed "
+                "train/test split; the holdout is fixed and cannot be changed. "
+                "Set validation.holdout.name=random_holdout or use raw_gis mode."
+            )
         return
 
 
