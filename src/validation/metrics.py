@@ -5,7 +5,17 @@ from __future__ import annotations
 from typing import Any, Callable
 
 import numpy as np
-from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score, roc_auc_score
+from sklearn.metrics import (
+    accuracy_score,
+    average_precision_score,
+    balanced_accuracy_score,
+    confusion_matrix,
+    f1_score,
+    matthews_corrcoef,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
 
 from .registry import METRIC_REGISTRY
 
@@ -47,6 +57,23 @@ def metric_roc_auc(labels, predictions, probabilities, sample_weight):
 @_register("confusion_matrix")
 def metric_confusion_matrix(labels, predictions, probabilities, sample_weight):
     return confusion_matrix(labels, predictions, sample_weight=sample_weight).tolist()
+
+
+@_register("average_precision")
+def metric_average_precision(labels, predictions, probabilities, sample_weight):
+    if len(set(labels)) != 2:
+        return None
+    return float(average_precision_score(labels, probabilities, sample_weight=sample_weight))
+
+
+@_register("balanced_accuracy")
+def metric_balanced_accuracy(labels, predictions, probabilities, sample_weight):
+    return float(balanced_accuracy_score(labels, predictions, sample_weight=sample_weight))
+
+
+@_register("mcc")
+def metric_mcc(labels, predictions, probabilities, sample_weight):
+    return float(matthews_corrcoef(labels, predictions, sample_weight=sample_weight))
 
 
 def build_metric_scorer(name: str, data):

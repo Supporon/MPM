@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -25,6 +24,7 @@ class TargetAreaPredictionTask:
     def __init__(self, task_config: Mapping[str, Any], prediction_config: Mapping[str, Any]):
         self.task_config = dict(task_config)
         self.prediction_config = dict(prediction_config)
+        self._normalization_range: tuple[float, float] | None = None
 
     @staticmethod
     def validate_config(
@@ -44,6 +44,15 @@ class TargetAreaPredictionTask:
             )
         if prediction_config["normalization"] not in {"minmax", "none", None}:
             raise ValueError("target_area_prediction normalization must be minmax or none")
+        if (
+            prediction_config["score_type"] in {"probability", "raw_score"}
+            and prediction_config["normalization"] == "minmax"
+        ):
+            raise ValueError(
+                "target_area_prediction normalization=minmax is only valid with "
+                "score_type=relative_score; probability/raw_score must use normalization=none "
+                "(MinMax-normalized values are not calibrated probabilities)."
+            )
         if float(research_unit_config["prediction_grid_size"]) <= 0:
             raise ValueError("target_area_prediction prediction_grid_size must be positive")
         if execution_mode == "raw_gis":
@@ -111,41 +120,44 @@ class TargetAreaPredictionTask:
     def predict(self, model: Any, target_features: pd.DataFrame, target_coords: pd.DataFrame) -> pd.DataFrame:
         """返回有效目标单元的坐标与正类得分。
 
-        根据 score_type 配置决定输出列名：
-        - ``probability`` (默认): 列名为 ``prob``，向后兼容
-        - ``raw_score``: 列名为 ``raw_score``，未经归一化的原始分数
-        - ``relative_score``: 列名为 ``relative_score``，MinMax 归一化后的相对分数
+        根据 score_type 配置决定输出列名与语义：
+        - ``probability``: ``predict_proba`` 的正类概率（未校准），列名 ``prob``（向后兼容）
+        - ``raw_score``: 模型 ``decision_function`` 原始决策分数，列名 ``raw_score``
+        - ``relative_score``: 相对分数；``normalization=minmax`` 时做 MinMax 并记录范围，
+          列名 ``relative_score``
         """
         score_type = self.prediction_config.get("score_type", "probability")
         if score_type not in {"probability", "raw_score", "relative_score"}:
-            raise ValueError(
-                f"Unsupported score_type: {score_type!r}"
-            )
-
-        probabilities = model.predict_proba(target_features)[:, 1]
-        if self.prediction_config["normalization"] == "minmax":
-            if score_type == "probability":
-                warnings.warn(
-                    "Baseline compatibility: applying MinMaxScaler.fit_transform over the target area; "
-                    "scores are not calibrated probabilities. "
-                    "Consider using score_type=relative_score to make this explicit.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-            probabilities = MinMaxScaler().fit_transform(probabilities.reshape(-1, 1)).ravel()
-        elif self.prediction_config["normalization"] not in {None, "none"}:
-            raise ValueError(
-                f"Unsupported target score normalization: {self.prediction_config['normalization']}"
-            )
+            raise ValueError(f"Unsupported score_type: {score_type!r}")
 
         if score_type == "raw_score":
+            if not hasattr(model, "decision_function"):
+                raise ValueError(
+                    "score_type=raw_score requires a model exposing decision_function "
+                    "(e.g. SVM / logistic regression). RandomForest only exposes "
+                    "predict_proba; use score_type=probability or relative_score."
+                )
+            scores = np.asarray(model.decision_function(target_features), dtype=float).ravel()
             score_col = "raw_score"
-        elif score_type == "relative_score":
-            score_col = "relative_score"
         else:
-            score_col = "prob"  # 向后兼容
+            scores = np.asarray(model.predict_proba(target_features)[:, 1], dtype=float).ravel()
+            score_col = "relative_score" if score_type == "relative_score" else "prob"
 
-        return pd.DataFrame({"X": target_coords["X"], "Y": target_coords["Y"], score_col: probabilities})
+        normalization = self.prediction_config.get("normalization", "none")
+        if normalization == "minmax":
+            scaler = MinMaxScaler()
+            scores = scaler.fit_transform(scores.reshape(-1, 1)).ravel()
+            self._normalization_range = (
+                float(scaler.data_min_[0]),
+                float(scaler.data_max_[0]),
+            )
+            score_col = "relative_score"
+        elif normalization not in {None, "none"}:
+            raise ValueError(f"Unsupported target score normalization: {normalization!r}")
+
+        return pd.DataFrame(
+            {"X": target_coords["X"].to_numpy(), "Y": target_coords["Y"].to_numpy(), score_col: scores}
+        )
 
     @staticmethod
     def reconstruct_grid(probabilities: pd.DataFrame, target_mask: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

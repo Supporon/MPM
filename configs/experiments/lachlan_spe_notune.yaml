@@ -96,7 +96,7 @@ validation:
   - roc_auc
   primary_metric: f1
 prediction:
-  score_type: probability
+  score_type: relative_score
   normalization: minmax
   export_geotiff: false
 label_refinement:

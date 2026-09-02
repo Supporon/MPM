@@ -83,7 +83,7 @@ DEFAULTS: dict[str, Any] = {
         "metrics": ["accuracy", "precision", "recall", "f1", "confusion_matrix", "roc_auc"],
         "primary_metric": "f1",
     },
-    "prediction": {"score_type": "probability", "normalization": "minmax", "export_geotiff": True},
+    "prediction": {"score_type": "probability", "normalization": "none", "export_geotiff": True},
 }
 
 

@@ -982,6 +982,104 @@ class FrameworkTests(unittest.TestCase):
             # 网格覆盖整个并集边界（含第二个 box）
             self.assertGreater(grid["X"].max(), 5)
 
+    def test_score_type_contract_rejects_minmax_probability(self) -> None:
+        """P0-5: probability/raw_score + minmax 是非法组合，验证失败。"""
+        with self.assertRaisesRegex(ValueError, "relative_score"):
+            TargetAreaPredictionTask.validate_config(
+                {"name": "target_area_prediction"},
+                {"type": "point_local_environment", "prediction_grid_size": 0.1},
+                {"score_type": "probability", "normalization": "minmax", "export_geotiff": False},
+                {},
+                "raw_gis",
+            )
+
+    def test_score_type_raw_score_requires_decision_function(self) -> None:
+        """P0-5: raw_score 需要 decision_function，仅 predict_proba 的模型报错。"""
+
+        class ProbOnlyModel:
+            def predict_proba(self, features):
+                return np.column_stack([np.ones(len(features)) * 0.3, np.ones(len(features)) * 0.7])
+
+        task = TargetAreaPredictionTask(
+            {}, {"score_type": "raw_score", "normalization": "none", "export_geotiff": False}
+        )
+        with self.assertRaisesRegex(ValueError, "decision_function"):
+            task.predict(
+                ProbOnlyModel(),
+                pd.DataFrame({"a": [0.0]}),
+                pd.DataFrame({"X": [1.0], "Y": [2.0]}),
+            )
+
+    def test_score_type_relative_score_records_range(self) -> None:
+        """P0-5: relative_score + minmax 输出列名为 relative_score 并记录范围。"""
+
+        class ProbModel:
+            def predict_proba(self, features):
+                return np.array([[0.8, 0.2], [0.6, 0.4]])
+
+        task = TargetAreaPredictionTask(
+            {}, {"score_type": "relative_score", "normalization": "minmax", "export_geotiff": False}
+        )
+        result = task.predict(
+            ProbModel(),
+            pd.DataFrame({"a": [0.0, 1.0]}),
+            pd.DataFrame({"X": [1.0, 2.0], "Y": [3.0, 4.0]}),
+        )
+        self.assertIn("relative_score", result.columns)
+        self.assertNotIn("prob", result.columns)
+        self.assertTrue((result["relative_score"] >= 0).all())
+        self.assertTrue((result["relative_score"] <= 1).all())
+        self.assertIsNotNone(task._normalization_range)
+
+    def test_additional_classification_metrics(self) -> None:
+        """P0-5: average_precision / balanced_accuracy / mcc 可计算。"""
+
+        class FixedModel:
+            def predict(self, features):
+                return np.array([0, 1, 0, 1])
+
+            def predict_proba(self, features):
+                return np.array([[0.9, 0.1], [0.1, 0.9], [0.8, 0.2], [0.2, 0.8]])
+
+        result = evaluate_classifier(
+            FixedModel(),
+            pd.DataFrame({"x": [0.0, 1.0, 2.0, 3.0]}),
+            pd.Series([0, 1, 0, 1]),
+            pd.Series([1.0, 1.0, 1.0, 1.0]),
+            ["average_precision", "balanced_accuracy", "mcc"],
+        )
+        self.assertIn("average_precision", result)
+        self.assertIn("balanced_accuracy", result)
+        self.assertIn("mcc", result)
+        self.assertAlmostEqual(result["balanced_accuracy"], 1.0, places=6)
+        self.assertAlmostEqual(result["mcc"], 1.0, places=6)
+
+    def test_mpm_area_metrics(self) -> None:
+        """P0-5: prediction-rate AUC 与面积捕获率符合预期。"""
+        from src.validation.mpm_metrics import (
+            capture_rate_at_area_fraction,
+            prediction_rate_auc,
+        )
+
+        # 完美排序：正类始终排在负类之前。
+        # 正类面积占比 0.5，理想 AUC = 1 - 0.5/2 = 0.75；50% 面积即可捕获全部正类。
+        perfect_scores = np.array([0.9, 0.8, 0.3, 0.2])
+        perfect_labels = np.array([1, 1, 0, 0])
+        area = np.array([1.0, 1.0, 1.0, 1.0])
+        self.assertAlmostEqual(prediction_rate_auc(perfect_scores, perfect_labels, area), 0.75, places=2)
+        self.assertAlmostEqual(
+            capture_rate_at_area_fraction(perfect_scores, perfect_labels, area, 0.5), 1.0, places=2
+        )
+
+        # 随机排序 → AUC≈0.5
+        rng = np.random.default_rng(0)
+        random_scores = rng.random(2000)
+        random_labels = rng.integers(0, 2, 2000).astype(float)
+        random_area = np.ones(2000)
+        self.assertAlmostEqual(
+            prediction_rate_auc(random_scores, random_labels, random_area), 0.5, delta=0.05
+        )
+
     def test_deep_edge_task_is_registered_but_explicitly_unavailable(self) -> None:
         with self.assertRaises(TaskCapabilityError):
             create_task(
