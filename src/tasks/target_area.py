@@ -112,9 +112,14 @@ class TargetAreaPredictionTask:
         inside_indices = np.flatnonzero(inside_flags)
         if len(inside_indices) != len(valid_target_rows):
             raise ValueError("Raw target grid and target mask no longer align")
+        # 第三列规范化为 bool：build_prediction_grid 经 np.column_stack 将 bool 与
+        # float 的 X/Y 混合后 promote 为 float64（0.0/1.0），直接写入 Python bool
+        # 会触发 pandas 的 LossySetitemError。先用 astype(bool) 整列重设 dtype。
+        mask_column = aligned_mask.columns[2]
+        aligned_mask[mask_column] = inside_flags.astype(bool)
         invalid_inside = inside_indices[~valid_target_rows.to_numpy()]
         if len(invalid_inside):
-            aligned_mask.iloc[invalid_inside, 2] = False
+            aligned_mask.loc[aligned_mask.index[invalid_inside], mask_column] = False
         return target, target[["X", "Y"]].reset_index(drop=True), aligned_mask
 
     def predict(self, model: Any, target_features: pd.DataFrame, target_coords: pd.DataFrame) -> pd.DataFrame:
@@ -191,7 +196,16 @@ class TargetAreaPredictionTask:
         dataset = gdal.GetDriverByName("GTiff").Create(
             str(path), len(x_values), len(y_values), 1, gdal.GDT_Float32
         )
-        dataset.SetGeoTransform((float(x_values.min()), step_x, 0, float(y_values.max()), 0, -step_y))
+        # 半像元定位（pixel-is-area）：栅格原点为左上角像元的左上角，
+        # 而 x_values/y_values 是预测单元中心，故各平移半个像元。
+        dataset.SetGeoTransform((
+            float(x_values.min()) - step_x / 2,
+            step_x,
+            0,
+            float(y_values.max()) + step_y / 2,
+            0,
+            -step_y,
+        ))
         srs = osr.SpatialReference()
         target_crs = self.prediction_config.get("target_crs")
         if target_crs is None:
