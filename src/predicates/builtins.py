@@ -1,17 +1,32 @@
 """TSIL 风格的内置 Predicate 实现。
 
-提供以下谓词类型：
+谓词按 kind 分为两类：
 
-1. **all_ones** (Φ_ones 控制谓词):
-   - 为所有样本生成 φ = 1 的向量
-   - 对应 TSIL 中的全 1 控制谓词
-   - 用于验证加权损失框架的正确性
+A. **constraint 谓词**（kind="constraint"）— 生成 φ 向量用于 TSIL 加权损失
+   1. **all_ones** (Φ_ones 控制谓词):
+      - 为所有样本生成 φ = 1 的向量
+      - 对应 TSIL 中的全 1 控制谓词
+      - 用于验证加权损失框架的正确性
 
-2. **spatial_box** (空间选框谓词):
-   - 在当前研究区域内框选一个正方形区域
-   - 将正方形内的样本 φ 值设置为指定值（默认 1.0）
-   - 其余样本 φ 值设置为 0
-   - 用于捕获空间局域内的统计不变量
+   2. **spatial_box** (空间选框谓词):
+      - 在当前研究区域内框选一个正方形区域
+      - 将正方形内的样本 φ 值设置为指定值（默认 1.0）
+      - 其余样本 φ 值设置为 0
+      - 用于捕获空间局域内的统计不变量
+
+   3. **spatial_distance** (空间距离谓词):
+      - 基于样本到参考点的距离构造 φ 向量
+      - 使用高斯核将距离映射到 (0, 1] 区间
+
+   4. **combined** (组合谓词):
+      - 将多个子谓词的 φ 向量拼接为多维 φ 矩阵
+
+B. **data_transform 谓词**（kind="data_transform"）— 修改标签/权重
+   当前内置暂无 data_transform 谓词。
+   示例：positive_constraint（筛选特定地质特征）、weight_adjustment（调整权重）
+
+管线执行顺序：data_transform 先于 constraint，
+确保约束基于最终变换后的数据生成。
 
 数学原理（参考 TSIL 论文）:
     φ 向量 → L2 归一化 φ̃ = φ / ||φ||
@@ -97,6 +112,7 @@ class AllOnesPredicate:
     """
 
     name = "all_ones"
+    kind = "constraint"
 
     def __init__(self, params: Mapping[str, Any]):
         self.params = dict(params)
@@ -144,6 +160,7 @@ class SpatialBoxPredicate:
     """
 
     name = "spatial_box"
+    kind = "constraint"
 
     def __init__(self, params: Mapping[str, Any]):
         self.params = dict(params)
@@ -250,6 +267,7 @@ class SpatialDistancePredicate:
     """
 
     name = "spatial_distance"
+    kind = "constraint"
 
     def __init__(self, params: Mapping[str, Any]):
         self.params = dict(params)
@@ -322,6 +340,7 @@ class CombinedPredicate:
     """
 
     name = "combined"
+    kind = "constraint"
 
     def __init__(self, params: Mapping[str, Any]):
         self.params = dict(params)

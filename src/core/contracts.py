@@ -95,6 +95,7 @@ class ModelAdapterProtocol(Protocol):
 
 class PredicateProtocol(Protocol):
     name: str
+    kind: str  # "data_transform" | "constraint"
     def apply(self, data: TrainingData, context: Mapping[str, Any]) -> TrainingData: ...
 
 
