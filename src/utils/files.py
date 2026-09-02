@@ -50,3 +50,35 @@ def git_commit(path: Path) -> str | None:
     except (FileNotFoundError, subprocess.CalledProcessError):
         return None
     return result.stdout.strip() or None
+
+
+def git_dirty(path: Path) -> bool | None:
+    """返回工作树是否有未提交改动；非 Git 工作树返回 None。"""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), "status", "--porcelain"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
+    return bool(result.stdout.strip())
+
+
+def environment_summary() -> dict[str, Any]:
+    """收集 Python 与核心依赖版本，用于复现清单。"""
+    import platform
+    import sys
+
+    summary: dict[str, Any] = {
+        "python_version": sys.version.split()[0],
+        "platform": platform.platform(),
+    }
+    for module_name in ("numpy", "pandas", "sklearn", "skopt", "geopandas", "torch"):
+        try:
+            module = __import__(module_name)
+            summary[module_name] = getattr(module, "__version__", "unknown")
+        except Exception:  # pragma: no cover - 依赖可选
+            summary[module_name] = None
+    return summary

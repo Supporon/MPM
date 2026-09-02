@@ -21,7 +21,15 @@ from ..operators.features.pipeline import FeaturePipeline
 from ..predicates.pipeline import PredicatePipeline
 from ..tasks.registry import create_task
 from ..tuning.registry import TUNER_REGISTRY
-from ..utils.files import git_commit, sha256_file, utc_timestamp, write_json, write_yaml
+from ..utils.files import (
+    environment_summary,
+    git_commit,
+    git_dirty,
+    sha256_file,
+    utc_timestamp,
+    write_json,
+    write_yaml,
+)
 from ..validation.metrics import evaluate_classifier
 from ..validation.splitters import create_holdout
 from .bootstrap import load_builtin_components
@@ -38,10 +46,12 @@ class Experiment:
         self.values = config.values
         self.spec = config.spec
         self.output_dir = config.output_dir
-        # 追加时间戳后缀，防止重复运行同一配置时覆盖前次结果
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.output_dir = self.output_dir.parent / f"{self.output_dir.name}_{timestamp}"
+        # 追加微秒级时间戳后缀，防止重复运行同一配置时覆盖前次结果；
+        # 目录原子创建见 _prepare_output_layout。
+        self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        self.output_dir = self.output_dir.parent / f"{self.output_dir.name}_{self.run_id}"
         self.values["experiment"]["output_dir"] = str(self.output_dir)
+        self.status = "created"
         self.dataset: ArchiveDataset | None = None
         self.preprocessor: BaselinePreprocessor | None = None
         self.model: Any | None = None
@@ -65,8 +75,9 @@ class Experiment:
         return self.spec.execution_mode
 
     def _prepare_output_layout(self) -> None:
+        # 顶层目录原子创建：已存在则失败，防止覆盖前次运行
+        self.output_dir.mkdir(parents=True, exist_ok=False)
         for directory in (
-            self.output_dir,
             self.output_dir / "models",
             self.output_dir / "intermediate",
             self.output_dir / "predictions",
@@ -276,6 +287,12 @@ class Experiment:
             self.component_metadata["holdout"] = self.spec.holdout.name
 
         training = self._apply_knowledge_and_predicates(training)
+        self._split_summary = {
+            "train_rows": int(len(training.labels)),
+            "test_rows": int(len(self._evaluation_data.labels)),
+            "train_positives": int((training.labels == 1).sum()),
+            "test_positives": int((self._evaluation_data.labels == 1).sum()),
+        }
         if training.constraints and not getattr(self.model_adapter, "supports_constraints", False):
             raise ValueError(
                 f"Model '{self.model_adapter.name}' does not support predicate constraints: "
@@ -306,6 +323,9 @@ class Experiment:
         if getattr(tuner, "uses_cross_validation", False):
             self.component_metadata["cross_validation"] = self.spec.cross_validation.name
 
+        self._best_params = (
+            dict(self.model.get_params()) if hasattr(self.model, "get_params") else None
+        )
         model_path = self.output_dir / "models" / self.model_adapter.artifact_filename
         with model_path.open("wb") as handle:
             pickle.dump(self.model, handle)
@@ -409,8 +429,20 @@ class Experiment:
         else:
             feature_schema = []
 
+        git_root = Path(__file__).resolve().parents[2]
+
+        def describe_output(path: Path) -> dict[str, Any]:
+            return {
+                "path": str(path.relative_to(self.output_dir)),
+                "size_bytes": path.stat().st_size,
+                "sha256": sha256_file(path),
+            }
+
         manifest = {
+            "schema_version": 1,
+            "run_id": self.run_id,
             "timestamp": utc_timestamp(),
+            "status": self.status,
             "experiment": self.spec.name,
             "variant": self.values["experiment"].get("variant", "baseline"),
             "config_source": str(self.config.source_path),
@@ -434,15 +466,18 @@ class Experiment:
             "input_paths": self._input_paths(),
             "feature_schema": feature_schema,
             "feature_count": len(feature_schema),
-            "git_commit": git_commit(Path(__file__).resolve().parents[2]),
+            "split_summary": getattr(self, "_split_summary", None),
+            "best_params": getattr(self, "_best_params", None),
+            "git_commit": git_commit(git_root),
+            "git_dirty": git_dirty(git_root),
+            "environment": environment_summary(),
             "output_files": [
-                str(path.relative_to(self.output_dir))
+                describe_output(path)
                 for path in self.output_files
                 if path.exists()
             ],
         }
         path = self.output_dir / "manifest.json"
-        manifest["output_files"].append("manifest.json")
         write_json(path, manifest)
         return manifest
 
@@ -522,6 +557,7 @@ class Experiment:
         }
 
     def run(self) -> dict[str, Any]:
+        self.status = "running"
         self._log.info("=" * 60)
         self._log.info("Experiment '%s' starting (mode=%s)", self.spec.name, self.mode)
         self._log.info("=" * 60)
@@ -534,10 +570,15 @@ class Experiment:
             ("evaluate", self.evaluate),
             ("predict", self.predict),
         ]
-        for name, method in phases:
-            t0 = time.monotonic()
-            method()
-            self._log.info("Phase '%s' completed in %.1fs", name, time.monotonic() - t0)
+        try:
+            for name, method in phases:
+                t0 = time.monotonic()
+                method()
+                self._log.info("Phase '%s' completed in %.1fs", name, time.monotonic() - t0)
+            self.status = "completed"
+        except Exception:
+            self.status = "failed"
+            raise
 
         manifest = self.export()
         self._log.info("Experiment '%s' complete. Output: %s", self.spec.name, self.output_dir)

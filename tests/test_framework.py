@@ -825,6 +825,39 @@ class FrameworkTests(unittest.TestCase):
         self.assertIn("未验证复现", report)
         self.assertNotIn("可正确复现", report)
 
+    def test_run_manifest_records_reproducibility_fields(self) -> None:
+        """P0-7: manifest 记录 run_id/status/environment/git_dirty/输出哈希。"""
+        loaded = load_config(LACHLAN_CONFIG)
+        values = copy.deepcopy(loaded.values)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = _write_synthetic_archive(root)
+            values["dataset"] = {"root": str(root), "archive_dir": str(archive)}
+            values["experiment"]["output_dir"] = str(root / "outputs" / "replay")
+            values["experiment"]["execution_mode"] = "archive_replay"
+            experiment = Experiment(ExperimentConfig(values=values, source_path=loaded.source_path))
+            experiment.run()
+            stored = json.loads((experiment.output_dir / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(stored["status"], "completed")
+            self.assertIn("run_id", stored)
+            self.assertIn("environment", stored)
+            self.assertIn("python_version", stored["environment"])
+            self.assertIn("git_dirty", stored)
+            self.assertTrue(any("sha256" in item for item in stored["output_files"]))
+
+    def test_setup_logging_closes_previous_handlers(self) -> None:
+        """P0-7: 连续多个实验目录不应累积 FileHandler。"""
+        import logging as _logging
+
+        from src.utils.logging import setup_logging
+
+        logger = _logging.getLogger("mpm")
+        with tempfile.TemporaryDirectory() as temporary:
+            for name in ("a", "b", "c"):
+                setup_logging(Path(temporary) / name)
+        file_handlers = [h for h in logger.handlers if isinstance(h, _logging.FileHandler)]
+        self.assertEqual(len(file_handlers), 1)
+
     def test_spatial_block_kfold_requires_coordinates(self) -> None:
         """P0-4: spatial_block_kfold 缺少坐标时抛出明确错误"""
         data = TrainingData(

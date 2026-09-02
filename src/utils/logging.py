@@ -13,13 +13,16 @@ LOG_FORMAT = "%(asctime)s [%(levelname)-5s] %(name)s: %(message)s"
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 _initialized: set[str] = set()
+_managed_handlers: list[logging.Handler] = []
 
 
 def setup_logging(output_dir: Path, *, console_level: int = logging.INFO) -> logging.Logger:
     """为一次实验运行配置控制台和文件日志。
 
     控制台输出到 stderr，文件输出到 ``<output_dir>/experiment.log``（追加模式）。
-    返回包级 logger ``"mpm"`` 供框架各处使用。重复调用不会重复添加 handler。
+    返回包级 logger ``"mpm"`` 供框架各处使用。重复调用不会重复添加 handler；
+    切换到新的输出目录时会关闭并移除上一轮本框架添加的 handler，避免日志
+    累积并重复写入此前的运行目录。
 
     Parameters
     ----------
@@ -41,6 +44,12 @@ def setup_logging(output_dir: Path, *, console_level: int = logging.INFO) -> log
         return logger
     _initialized.add(key)
 
+    # 关闭并移除上一轮由本框架添加的 handler，避免跨运行目录累积
+    for handler in _managed_handlers:
+        logger.removeHandler(handler)
+        handler.close()
+    _managed_handlers.clear()
+
     logger.setLevel(logging.DEBUG)
 
     # --- 控制台 handler (stderr) ---
@@ -55,6 +64,8 @@ def setup_logging(output_dir: Path, *, console_level: int = logging.INFO) -> log
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(logging.Formatter(LOG_FORMAT, DATE_FORMAT))
     logger.addHandler(file_handler)
+
+    _managed_handlers.extend([console_handler, file_handler])
 
     # 防止第三方库的 "No handlers could be found" 警告
     logging.getLogger().addHandler(logging.NullHandler())
