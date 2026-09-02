@@ -93,6 +93,7 @@ prediction:
   score_type: probability
   normalization: minmax
   export_geotiff: true
+  target_crs: 4283
 label_refinement:
   enabled: false
 knowledge:

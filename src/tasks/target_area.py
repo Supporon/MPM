@@ -181,10 +181,21 @@ class TargetAreaPredictionTask:
         )
         dataset.SetGeoTransform((float(x_values.min()), step_x, 0, float(y_values.max()), 0, -step_y))
         srs = osr.SpatialReference()
-        target_crs = int(self.prediction_config.get("target_crs", 4283))
-        srs.ImportFromEPSG(target_crs)
+        target_crs = self.prediction_config.get("target_crs")
+        if target_crs is None:
+            raise ValueError(
+                "prediction.target_crs must be set when export_geotiff=true "
+                "(an EPSG integer or a WKT/proj4 string). The Lachlan/NSW archive "
+                "uses GDA94/EPSG:4283."
+            )
+        if isinstance(target_crs, int):
+            srs.ImportFromEPSG(target_crs)
+        else:
+            srs.ImportFromWkt(str(target_crs))
         dataset.SetProjection(srs.ExportToWkt())
-        dataset.GetRasterBand(1).WriteArray(np.flipud(grid))
+        band = dataset.GetRasterBand(1)
+        band.SetNoDataValue(-9999.0)
+        band.WriteArray(np.flipud(grid))
         dataset.FlushCache()
         dataset = None
         return path

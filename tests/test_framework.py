@@ -946,6 +946,42 @@ class FrameworkTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "decimal degrees"):
             splitter.build_cv({"n_splits": 2, "block_size_m": 50000}, 42, data)
 
+    def test_research_units_union_crs_and_sampling_contract(self) -> None:
+        """P0-6: 边界需 CRS、多要素取并集、采样达到请求数量。"""
+        try:
+            import geopandas as gpd
+            from shapely.geometry import box
+        except ImportError:  # pragma: no cover
+            self.skipTest("geopandas/shapely not installed")
+        from src.data.research_units import build_prediction_grid, sample_unlabeled_units
+
+        label_config = {"unlabeled_value": 0, "sample_weight": {"unlabeled": 0.5}}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            # 无 CRS 边界 → 明确失败
+            no_crs = gpd.GeoDataFrame(geometry=[box(0, 0, 10, 10)])
+            no_crs_path = root / "no_crs.shp"
+            no_crs.to_file(no_crs_path)
+            with self.assertRaisesRegex(ValueError, "CRS"):
+                sample_unlabeled_units(str(no_crs_path), 5, label_config, seed=42)
+
+            # 多要素边界：并集（dissolve）后仍能采样/建网格
+            multi = gpd.GeoDataFrame(
+                geometry=[box(0, 0, 5, 5), box(5, 0, 10, 5)], crs="EPSG:3857"
+            )
+            multi_path = root / "multi.shp"
+            multi.to_file(multi_path)
+
+            sampled = sample_unlabeled_units(str(multi_path), 20, label_config, seed=42)
+            self.assertEqual(len(sampled), 20)
+            self.assertTrue(((sampled["X"] >= 0) & (sampled["X"] <= 10)).all())
+
+            grid, _mask = build_prediction_grid(str(multi_path), 2.0)
+            self.assertGreater(len(grid), 0)
+            # 网格覆盖整个并集边界（含第二个 box）
+            self.assertGreater(grid["X"].max(), 5)
+
     def test_deep_edge_task_is_registered_but_explicitly_unavailable(self) -> None:
         with self.assertRaises(TaskCapabilityError):
             create_task(
