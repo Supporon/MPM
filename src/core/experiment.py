@@ -30,6 +30,7 @@ from ..utils.files import (
     write_json,
     write_yaml,
 )
+from ..utils.seeds import derive_seeds
 from ..validation.metrics import evaluate_classifier
 from ..validation.splitters import create_holdout
 from .bootstrap import load_builtin_components
@@ -52,6 +53,8 @@ class Experiment:
         self.output_dir = self.output_dir.parent / f"{self.output_dir.name}_{self.run_id}"
         self.values["experiment"]["output_dir"] = str(self.output_dir)
         self.status = "created"
+        # 从实验基础种子派生各用途种子，保证采样/划分/调参互不干扰且可复现
+        self.seeds = derive_seeds(self.spec.seed)
         self.dataset: ArchiveDataset | None = None
         self.preprocessor: BaselinePreprocessor | None = None
         self.model: Any | None = None
@@ -128,7 +131,7 @@ class Experiment:
             self.values["research_unit"],
             self.values["label"],
             len(deposits),
-            seed=self.spec.seed,
+            seed=self.seeds["sampling_seed"],
         )
         unlabelled = pipeline.extract(unlabelled_units).dropna().reset_index(drop=True)
         unlabelled = unlabelled.loc[:, deposits.columns]
@@ -261,9 +264,9 @@ class Experiment:
             )
             # 先做外层 holdout 划分，再仅对训练折拟合预处理，避免测试集泄漏
             holdout = create_holdout(
-                self.spec.holdout.name, self.spec.holdout.params, self.spec.seed
+                self.spec.holdout.name, self.spec.holdout.params, self.seeds["split_seed"]
             )
-            split: SplitData = holdout.split(training, self.spec.holdout.params, self.spec.seed)
+            split: SplitData = holdout.split(training, self.spec.holdout.params, self.seeds["split_seed"])
             train_split = split.train
             test_split = split.test
 
@@ -314,7 +317,7 @@ class Experiment:
                 "params": self.spec.cross_validation.params,
             },
             self.spec.primary_metric,
-            self.spec.seed,
+            self.seeds["tuning_seed"],
         )
         elapsed = time.monotonic() - t_start
         self._log.info("Training completed in %.1fs", elapsed)
@@ -449,6 +452,7 @@ class Experiment:
             "config_source": str(self.config.source_path),
             "config": self.values,
             "seed": self.spec.seed,
+            "derived_seeds": self.seeds,
             "task": self.spec.task.name,
             "execution_mode": self.mode,
             "components": {
