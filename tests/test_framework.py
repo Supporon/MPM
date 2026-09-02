@@ -294,6 +294,74 @@ class FrameworkTests(unittest.TestCase):
         )
         self.assertEqual(target.columns.tolist(), prepared.feature_columns)
 
+    def test_preprocessor_fit_is_isolated_from_test_split(self) -> None:
+        """P0-3: 改变测试集分布不改变训练 scaler 均值/方差（split-first）。"""
+        rng = np.random.default_rng(0)
+        frame = pd.DataFrame(
+            {
+                "X": np.arange(20, dtype=float),
+                "Y": np.arange(20, dtype=float),
+                "num": rng.normal(size=20),
+                "label": [0, 1] * 10,
+                "sample_weight": np.ones(20),
+            }
+        )
+        train = frame.iloc[:10]
+        test = frame.iloc[10:]
+        preprocessor = BaselinePreprocessor(
+            {
+                "correlation_threshold": 0.7,
+                "categorical_encoding": "onehot_ignore_unknown",
+                "scaling": "standard",
+            },
+            42,
+        )
+        preprocessor.fit(train, unit_columns=["X", "Y"])
+        mean_before = preprocessor.scaler.mean_.copy()
+        var_before = preprocessor.scaler.var_.copy()
+
+        # 大幅改变测试集数值分布后再 transform，训练 scaler 统计量不得改变
+        perturbed = test.copy()
+        perturbed["num"] = perturbed["num"] + 1e6
+        preprocessor.transform(perturbed)
+
+        self.assertTrue(np.allclose(preprocessor.scaler.mean_, mean_before))
+        self.assertTrue(np.allclose(preprocessor.scaler.var_, var_before))
+
+    def test_preprocessor_encoder_does_not_learn_test_categories(self) -> None:
+        """P0-3: 测试集独有类别不出现在训练时拟合的编码器类别中。"""
+        train = pd.DataFrame(
+            {
+                "X": [1.0, 2.0],
+                "Y": [1.0, 2.0],
+                "cat": ["a", "b"],
+                "label": [1, 0],
+                "sample_weight": [1.0, 1.0],
+            }
+        )
+        test = pd.DataFrame(
+            {
+                "X": [3.0],
+                "Y": [3.0],
+                "cat": ["unseen"],
+                "label": [0],
+                "sample_weight": [1.0],
+            }
+        )
+        preprocessor = BaselinePreprocessor(
+            {
+                "correlation_threshold": 0.7,
+                "categorical_encoding": "onehot_ignore_unknown",
+                "scaling": "standard",
+            },
+            42,
+        )
+        preprocessor.fit(train, unit_columns=["X", "Y"])
+        self.assertNotIn("unseen", preprocessor.encoder.categories_[0])
+        # 未知类别经 handle_unknown="ignore" 转为全零，不应报错
+        transformed = preprocessor.transform(test)
+        self.assertEqual(len(transformed), 1)
+
     def test_model_tuner_metric_and_predicate_contracts(self) -> None:
         rng = np.random.default_rng(42)
         data = TrainingData(

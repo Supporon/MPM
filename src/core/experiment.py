@@ -142,17 +142,15 @@ class Experiment:
         self.preprocessor = BaselinePreprocessor(
             self.values["preprocess"], self.values["experiment"]["seed"]
         )
-        prepared = self.preprocessor.prepare_training(
-            self._raw_deposits,
-            self._raw_unlabelled,
-            unit_columns=self._research_unit_columns,
+        # 不在此处拟合；预处理拟合推迟到外层划分之后的训练折内进行（split-first）。
+        self._raw_training_frame = pd.concat(
+            [self._raw_deposits, self._raw_unlabelled], ignore_index=True
         )
         target, target_coords, target_mask = self.task.prepare_prediction_data(
             self._raw_target_data, self._raw_target_mask
         )
 
-        self._raw_prepared = prepared
-        self._raw_target_features = self.preprocessor.transform_target_legacy(target)
+        self._raw_target_frame = target
         self._raw_target_coords = target_coords
         self._raw_target_mask = target_mask
 
@@ -237,18 +235,43 @@ class Experiment:
                 int((training.labels == 0).sum()),
             )
         else:
-            training = self._training_from_frame(
-                self._raw_prepared.xy_train,
-                self._raw_prepared.feature_columns,
-                units=self._raw_prepared.xy_train_units,
+            frame = self._raw_training_frame
+            unit_columns = self._research_unit_columns
+            raw_feature_columns = [
+                column
+                for column in frame.columns
+                if column not in set(unit_columns) | {"label", "sample_weight"}
+            ]
+            training = TrainingData(
+                frame[raw_feature_columns].reset_index(drop=True),
+                frame["label"].reset_index(drop=True),
+                frame["sample_weight"].reset_index(drop=True),
+                metadata={"units": frame[unit_columns].reset_index(drop=True)},
             )
-            # 先做 holdout 划分，再在训练集上执行 PUB，避免数据泄漏
+            # 先做外层 holdout 划分，再仅对训练折拟合预处理，避免测试集泄漏
             holdout = create_holdout(
                 self.spec.holdout.name, self.spec.holdout.params, self.spec.seed
             )
             split: SplitData = holdout.split(training, self.spec.holdout.params, self.spec.seed)
-            training = split.train
-            self._evaluation_data = split.test
+            train_split = split.train
+            test_split = split.test
+
+            self.preprocessor.fit(train_split.features, unit_columns=unit_columns)
+            train_features = self.preprocessor.transform(train_split.features)
+            test_features = self.preprocessor.transform(test_split.features)
+
+            training = TrainingData(
+                train_features.reset_index(drop=True),
+                train_split.labels.reset_index(drop=True),
+                train_split.sample_weight.reset_index(drop=True),
+                metadata={"units": train_split.metadata["units"].reset_index(drop=True)},
+            )
+            self._evaluation_data = TrainingData(
+                test_features.reset_index(drop=True),
+                test_split.labels.reset_index(drop=True),
+                test_split.sample_weight.reset_index(drop=True),
+                metadata={"units": test_split.metadata["units"].reset_index(drop=True)},
+            )
             training = self._apply_label_refinement(training)
             self.component_metadata["holdout"] = self.spec.holdout.name
 
@@ -366,7 +389,7 @@ class Experiment:
             target_coords = self.dataset.target_coords
             target_mask = self.dataset.target_mask
         else:
-            target_features = self._raw_target_features
+            target_features = self.preprocessor.transform(self._raw_target_frame)
             target_coords = self._raw_target_coords
             target_mask = self._raw_target_mask
 

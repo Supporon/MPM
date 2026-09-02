@@ -65,10 +65,89 @@ class BaselinePreprocessor:
         self.scaler = StandardScaler()
         self.numerical_columns: list[str] = []
         self.categorical_columns: list[str] = []
+        self._encoded_columns: list[str] = []
         self.feature_columns: list[str] = []
         self.correlation: pd.DataFrame | None = None
         self.encoder_fitted = False
         self.scaler_fitted = False
+
+    def fit(
+        self,
+        frame: pd.DataFrame,
+        unit_columns: tuple[str, ...] | list[str] = ("X", "Y"),
+    ) -> "BaselinePreprocessor":
+        """在给定 frame 上拟合相关性筛选、OneHotEncoder 与 StandardScaler。
+
+        只对传入的 frame 学习统计量，绝不触碰调用方之外的数据。外层
+        划分必须先于本方法执行，训练折调用 ``fit``、验证/测试/目标折
+        只调用 ``transform``。
+        """
+        numerical, categorical = split_feature_columns(frame, unit_columns)
+
+        # 相关性筛选只使用训练折
+        correlation = frame[numerical].corr(method="spearman").abs()
+        upper = correlation.where(np.triu(np.ones(correlation.shape), k=1).astype(bool))
+        dropped = [
+            column for column in upper.columns
+            if any(upper[column] > self.config["correlation_threshold"])
+        ]
+        self.numerical_columns = [column for column in numerical if column not in dropped]
+        self.categorical_columns = categorical
+        self.correlation = correlation
+
+        # OneHotEncoder 只在训练折上拟合
+        if categorical:
+            self.encoder.fit(frame[categorical])
+            self.encoder_fitted = True
+            try:
+                self._encoded_columns = self.encoder.get_feature_names(categorical).tolist()
+            except AttributeError:
+                self._encoded_columns = self.encoder.get_feature_names_out(categorical).tolist()
+        else:
+            self._encoded_columns = []
+
+        # StandardScaler 只在训练折上拟合
+        if self.numerical_columns:
+            self.scaler.fit(frame[self.numerical_columns])
+            self.scaler_fitted = True
+
+        self.feature_columns = list(self.numerical_columns) + list(self._encoded_columns)
+        return self
+
+    def transform(self, frame: pd.DataFrame) -> pd.DataFrame:
+        """使用已拟合的编码器与缩放器对 frame 做 ``transform``（不重新拟合）。"""
+        if not (self.scaler_fitted or self.encoder_fitted):
+            raise RuntimeError(
+                "BaselinePreprocessor must be fitted before transform(); "
+                "call fit()/fit_transform() on the training split first."
+            )
+        index = frame.index
+        if self.numerical_columns:
+            numeric = pd.DataFrame(
+                self.scaler.transform(frame[self.numerical_columns]),
+                columns=self.numerical_columns,
+                index=index,
+            )
+        else:
+            numeric = pd.DataFrame(index=index)
+        if self.categorical_columns:
+            encoded = pd.DataFrame(
+                self.encoder.transform(frame[self.categorical_columns]).toarray(),
+                columns=self._encoded_columns,
+                index=index,
+            )
+        else:
+            encoded = pd.DataFrame(index=index)
+        return pd.concat([numeric, encoded], axis=1)
+
+    def fit_transform(
+        self,
+        frame: pd.DataFrame,
+        unit_columns: tuple[str, ...] | list[str] = ("X", "Y"),
+    ) -> pd.DataFrame:
+        """在训练折上拟合并返回变换后的特征矩阵。"""
+        self.fit(frame, unit_columns)
+        return self.transform(frame)
 
     def prepare_training(
         self,
@@ -76,10 +155,12 @@ class BaselinePreprocessor:
         unlabeled: pd.DataFrame,
         unit_columns: tuple[str, ...] | list[str] = ("X", "Y"),
     ) -> PreparedTrainingData:
-        """按照 Notebook 语义筛选、编码、缩放并切分原始单元。
+        """（遗留接口）按照 Notebook 语义筛选、编码、缩放并切分原始单元。
 
-        与旧版基线实现的关键区别：相关性筛选和 OneHotEncoder 拟合
-        现在在训练/测试划分之后执行，仅在训练集上拟合，避免数据泄漏。
+        .. deprecated::
+            科研流程已改用 ``fit`` / ``transform`` / ``fit_transform``，
+            由 ``Experiment`` 在外层划分之后仅对训练折拟合。本方法保留了
+            内部 ``train_test_split`` 语义，仅供一期兼容与测试使用。
         """
         training = pd.concat([deposits, unlabeled], ignore_index=True)
         numerical, categorical = split_feature_columns(training, unit_columns)
@@ -214,12 +295,12 @@ class BaselinePreprocessor:
         )
 
     def transform_target_legacy(self, target_data: pd.DataFrame) -> pd.DataFrame:
-        """对目标数据应用与训练集相同的预处理变换。
+        """（遗留接口）对目标数据应用与训练集相同的预处理变换。
 
-        使用已拟合的 Scaler 和 OneHotEncoder 进行 transform（不再重新 fit）。
-
-        TODO(science)：旧版基线实现在目标侧执行 ``scaler.fit_transform``，
-        现已修复为 ``scaler.transform``。通过实验种子确保可复现性。
+        .. deprecated::
+            科研流程已改用 ``fit`` / ``transform``，目标折直接调用
+            ``transform``。本方法保留了未拟合时的 ``fit_transform``
+            回退分支，仅供一期兼容与测试使用。
         """
         if self.scaler_fitted:
             if self.numerical_columns:
