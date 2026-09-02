@@ -27,4 +27,6 @@ pytest -q
 
 Phase-1 迁移背景仍保留在 [`docs/PHASE1_MIGRATION.md`](docs/PHASE1_MIGRATION.md)。旧实验 YAML 可继续加载，配置层会自动迁移为 phase-2 `ExperimentSpec`。
 
-注意：`deep_edge_prediction` 当前只是显式能力占位；空间 CV、真实地质知识/谓词和更多模型需要按注册表契约继续实现，不能视为已经具备。
+已实现能力：三种执行模式（`archive_replay` / `train_from_archive_features` / `raw_gis`）、空间 CV（`spatial_block_kfold` / `spatial_group_kfold` / `spatial_block_holdout`）、RF/SPE/CNN/MLP 模型、TSIL 风格谓词约束加权损失（MLP）、MPM 面积捕获指标（`src/validation/mpm_metrics.py`）。
+
+注意：`deep_edge_prediction` 仍只是显式能力占位（不具备三维深部预测能力）；SPE/CNN 与 TSIL 数值对齐属 `experimental`，真实地质知识/谓词需按注册表契约继续扩展。

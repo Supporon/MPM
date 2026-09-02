@@ -514,7 +514,7 @@ model.predict_proba(X)                             # ④ 预测概率
 
 ### 8.1 新增模型
 
-完整步骤参见下方。以 XGBoost 为例：
+完整步骤参见下方。以 XGBoost 为例（**教程示例**：`xgb` 组件与 `lachlan_xgb.yaml` 需你自行创建，当前仓库未预置）：
 
 **第一步：编写适配器** — `src/models/xgb.py`
 
@@ -1121,19 +1121,14 @@ python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
     --set tuning.name=none knowledge.enabled=false experiment.name=knowledge_none
 
 # 使用 empty 知识提供器（验证链路）
+# 注意：knowledge.items 是列表，`--set` 不支持列表索引；需复制
+# lachlan_rf_phase2.yaml 为专用配置，在 YAML 中写入 knowledge.items。
 python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
     --set tuning.name=none knowledge.enabled=true \
-    knowledge.items.0.name=empty \
     experiment.name=knowledge_empty
 
-# 知识 + 谓词联合使用（知识识别有利区，谓词调整权重）
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none \
-    knowledge.enabled=true \
-    knowledge.items.0.name=favorable_zone \
-    predicates.enabled=true \
-    predicates.items.0.name=weight_adjustment \
-    experiment.name=knowledge_pred_combined
+# 知识 + 谓词联合使用 —— favorable_zone / weight_adjustment 为 GUIDE 示例组件，
+# 尚未内置注册，需先自行注册后，再在专用 YAML 中配置 items 列表。
 ```
 
 ### 9.8 不同知识使用方式对比
@@ -1165,18 +1160,18 @@ python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
 
 **目的：** 比较不同特征集对预测性能的影响。
 
-**注意：** `--set` 不支持列表/JSON 值。要更换特征算子集，请创建专用 YAML 配置文件（如 `configs/experiments/lachlan_rf_feat_geology.yaml`），在其中修改 `features.operators` 列表。
+**注意：** 特征算子只在 `raw_gis` 模式下执行；`train_from_archive_features` 使用归档固定特征，不能更换算子。且 `--set` 不支持列表值。要比较不同特征集，需以 `lachlan_rf_raw_gis.yaml` 为模板，自行创建专用 YAML 配置（例如 `lachlan_rf_feat_geology.yaml`），在其中修改 `features.operators` 列表。以下命令假定你已创建这些配置。
 
 ```bash
 # 全部特征（基线）
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
+python run.py --config configs/experiments/lachlan_rf_raw_gis.yaml \
     --set tuning.name=none experiment.name=feat_all
 
-# 仅地质+线距离特征 — 使用专用 YAML 配置
+# 仅地质+线距离特征 — 需自行创建的专用 YAML
 python run.py --config configs/experiments/lachlan_rf_feat_geology.yaml \
     --set tuning.name=none experiment.name=feat_geology_only
 
-# 仅地球物理特征 — 使用专用 YAML 配置
+# 仅地球物理特征 — 需自行创建的专用 YAML
 python run.py --config configs/experiments/lachlan_rf_feat_geophysics.yaml \
     --set tuning.name=none experiment.name=feat_geophysics_only
 ```
@@ -1185,19 +1180,21 @@ python run.py --config configs/experiments/lachlan_rf_feat_geophysics.yaml \
 
 **目的：** 比较不同预处理参数的影响。
 
+**注意：** 预处理（相关性筛选 / OneHot / 标准化）只在 `raw_gis` 模式下拟合；`train_from_archive_features` 使用归档中已固定的特征，`preprocess.*` 不生效。以下命令基于 `raw_gis` 配置。
+
 ```bash
 # 默认相关性阈值 0.7
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
+python run.py --config configs/experiments/lachlan_rf_raw_gis.yaml \
     --set tuning.name=none preprocess.correlation_threshold=0.7 \
     experiment.name=prep_corr_07
 
 # 更严格的相关性阈值 0.5
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
+python run.py --config configs/experiments/lachlan_rf_raw_gis.yaml \
     --set tuning.name=none preprocess.correlation_threshold=0.5 \
     experiment.name=prep_corr_05
 
 # 更宽松的相关性阈值 0.9
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
+python run.py --config configs/experiments/lachlan_rf_raw_gis.yaml \
     --set tuning.name=none preprocess.correlation_threshold=0.9 \
     experiment.name=prep_corr_09
 ```
@@ -1306,6 +1303,8 @@ done
 ```
 
 ### 9.16 完整批处理实验脚本模板
+
+> **模板说明**：以下脚本是**需要按实际情况改写**的模板。不同模型（RF/SPE/CNN/MLP）需要各自的 `model.params` 与搜索空间，不能仅切换 `model.name`；不同特征组合需先基于 `raw_gis` 模式创建专用 YAML（见 9.9）。直接照抄可能因配置校验失败而中止。
 
 ```bash
 #!/bin/bash
@@ -1534,24 +1533,22 @@ python run.py --config ... --set experiment.name=my_unique_name
 
 ```bash
 # 使用空间块留出法（推荐替换 random_holdout）
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
+python run.py --config configs/experiments/lachlan_rf_raw_gis.yaml \
     --set validation.holdout.name=spatial_block_holdout \
     validation.holdout.params.block_size_m=50000
 
 # 使用空间块 K-Fold 交叉验证
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
+python run.py --config configs/experiments/lachlan_rf_raw_gis.yaml \
     --set validation.cross_validation.name=spatial_block_kfold \
     validation.cross_validation.params.block_size_m=50000
 
 # 使用已有分组 ID 的空间分组 K-Fold（如矿集区/地质域）
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
+python run.py --config configs/experiments/lachlan_rf_raw_gis.yaml \
     --set validation.cross_validation.name=spatial_group_kfold \
     validation.cross_validation.params.group_column=group_id
 ```
 
-**空间分拆器要求** `TrainingData.metadata["units"]` 中包含 X/Y 坐标列。如果使用 `raw_gis` 模式，这些坐标会自动包含；如果使用 `train_from_archive_features` 模式，需要确保归档数据中包含坐标元数据。
-
-```
+**空间分拆器要求**：只能在 `raw_gis` 模式下使用（`train_from_archive_features` 使用归档固定的 train/test 划分，不执行 holdout；`archive_replay` 不训练）。空间分拆器需要 `TrainingData.metadata["units"]` 中的 X/Y 坐标，且要求**投影坐标（米）**——经纬度坐标会触发明确错误，需先重投影到 UTM 等度量 CRS。
 
 ### 如何确认 config_resolved.yaml 是最终参数
 
