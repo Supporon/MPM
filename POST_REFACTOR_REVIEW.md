@@ -16,7 +16,7 @@
 | P0-E | 空间验证修正（group 注入、经纬度检测、PUB 传 data） | 完成 |
 | P0-F | CRS/ROI/GeoTIFF 硬约束（边界并集、CRS 校验、采样不足失败、显式 target_crs） | 完成 |
 | P1-A | 复现工件与日志（微秒 run_id 原子创建、run 状态、manifest 增强、日志 handler 清理） | 完成 |
-| P1-B | MLP/Predicate/TSIL 链路（φ 合并、sample_weight、bayes+constraints 显式报错、torch 依赖、MLP YAML） | 完成 |
+| P1-B | MLP/Predicate/LUSI 链路（φ 合并、sample_weight、bayes+constraints 显式报错、torch 依赖、MLP YAML） | 完成 |
 | P1-C | GUIDE/README 一致性（移除无效命令与不存在配置引用、修正 stray fence、能力状态说明） | 部分完成* |
 
 *P1-C 仅做针对性修正；GUIDE 第 9 节大量消融命令仍需按新能力边界全面重写（见 §4）。
@@ -44,18 +44,18 @@ $ python -m pytest -q
 
 按优先级排序：
 
-1. **GUIDE 第 9 节全面重写**：以 `CODEING_UPDATE_MD/GUIDE.optimized-draft.md` 为底稿，结合新能力边界，用 CI smoke test 验证每条非耗时命令。
-2. **TSIL 损失数值对齐**：`losses.py` 的 P 项缩放 `(1/N)·‖φ̃ᵀe‖²` 需与 TSIL 参考实现的 `‖(1/B)·Φᵀe‖²` 做固定输入数值对齐后再定性。
-3. **SPE / CNN 科学有效性验证**：SPE 与 `imbalanced-ensemble.SelfPacedEnsembleClassifier` 固定种子一致性；CNN 列置换敏感性实验，未证明前保持 `experimental`。
-4. **SeedContext 派生种子**：当前各组件共用 `experiment.seed`，需派生 sampling/split/tuning/model/dataloader 种子并贯通（manifest 记录）。
-5. **MPM 指标接入评估链**：`mpm_metrics.py` 已实现纯函数，但需 `unit_area` 扩展评估上下文后方可接入 `evaluate_classifier`。
-6. **模式能力完整性**：`train_from_archive_features` 还应拒绝 holdout / research_unit 变更（当前仅拒绝 PUB 与算子）。
-7. **GeoTIFF 模板继承**：半像元定位、继承源栅格 transform/分辨率/nodata（当前已移除硬编码 EPSG，但未继承模板）。
-8. **贝叶斯搜索 + 约束模型**：当前显式报错；完整方案需 constraint-aware CV splitter。
-9. **三维契约**：`deep_edge_prediction` 仍为占位，需 voxel 单元/钻孔标签/3D CRS/3D 特征/3D 验证等契约完成后才能实现。
+1. **GUIDE 第 9 节全面重写**：以 `CODEING_UPDATE_MD/GUIDE.optimized-draft.md` 为底稿，结合新能力边界，用 CI smoke test 验证每条非耗时命令。（研究型/文档工程）
+2. **LUSI 损失数值对齐**：`losses.py` 的 P 项缩放 `(1/N)·‖φ̃ᵀe‖²` 需与 TSIL 参考实现的 `‖(1/B)·Φᵀe‖²` 做固定输入数值对齐后再定性。（研究型）
+3. **SPE / CNN 科学有效性验证**：SPE 与 `imbalanced-ensemble.SelfPacedEnsembleClassifier` 固定种子一致性；CNN 列置换敏感性实验，未证明前保持 `experimental`。（研究型）
+4. **GeoTIFF 模板继承（剩余）**：半像元定位已完成；尚需继承源栅格 transform/分辨率/nodata。
+5. **贝叶斯搜索 + 约束模型**：当前显式报错；完整方案需 constraint-aware CV splitter。
+6. **三维契约**：`deep_edge_prediction` 仍为占位，需 voxel 单元/钻孔标签/3D CRS/3D 特征/3D 验证等契约完成后才能实现。
+
+已完成（本轮追加提交）：SeedContext 派生种子、MPM 指标接入评估链、模式能力完整性（archive-feature 拒绝 holdout 变更）、GeoTIFF 半像元定位。
 
 ## 5. 未完成能力（能力状态）
 
 - `deep_edge_prediction`：placeholder（无三维能力）。
-- SPE / CNN / TSIL 链路：experimental（未做算法一致性验证）。
+- SPE / CNN / LUSI 链路：experimental（未做算法一致性验证）。
 - 概率校准（calibrated_probability）：未实现（需独立校准集或 OOF）。
+- MPM 面积指标：已接入 `evaluate_classifier`，但需数据源提供 `unit_area` 才会计算。
