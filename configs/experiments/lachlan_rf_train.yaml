@@ -3,11 +3,9 @@ experiment:
   seed: 42
   output_dir: outputs/lachlan_rf_train
   execution_mode: train_from_archive_features
-
 task:
   name: target_area_prediction
   region: lachlan
-
 dataset:
   root: ../EarthByte-MPM_Lachlan_Porphyry
   archive_dir: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Outputs_Cu_Lachlan_v1.6
@@ -16,23 +14,27 @@ dataset:
   training_boundary: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Frames/NSW_Boundary/NSW_STATE_POLYGON_shp_GDA94_NoIsland_ACT.shp
   geology:
     line_files:
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/IntrusionsBndys_FaultedBndys.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/IntrusionsBndys_GeologicalBndys.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/IntrusionsBndys_IntrusiveBndys.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/IntrusionsBndys_UnconformableBndys.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/MetamorphicBoundaries_Faults.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/MetamorphicBoundaries_GeologicalBndys.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/MetamorphicBoundaries_MetamorphicBndys.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/MetamorphicBoundaries_Unconformities.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/RockUnitBndyFaults_LAO_Faulted boundary.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/RockUnitBndyFaults_LAO_Geological boundary.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/RockUnitBndyFaults_LAO_Intrusive boundary.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/RockUnitBndyFaults_LAO_Unconformable boundary.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/MetamorphicIsograds.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/IntrusionsBndys_FaultedBndys.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/IntrusionsBndys_GeologicalBndys.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/IntrusionsBndys_IntrusiveBndys.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/IntrusionsBndys_UnconformableBndys.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/MetamorphicBoundaries_Faults.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/MetamorphicBoundaries_GeologicalBndys.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/MetamorphicBoundaries_MetamorphicBndys.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/MetamorphicBoundaries_Unconformities.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/RockUnitBndyFaults_LAO_Faulted
+      boundary.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/RockUnitBndyFaults_LAO_Geological
+      boundary.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/RockUnitBndyFaults_LAO_Intrusive
+      boundary.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/RockUnitBndyFaults_LAO_Unconformable
+      boundary.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/MetamorphicIsograds.shp
     metamorphic_facies:
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polygons/MetamorphicFacies_Benambran.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polygons/MetamorphicFacies_KanimblanTablelands.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polygons/MetamorphicFacies_Tabberabberan.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polygons/MetamorphicFacies_Benambran.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polygons/MetamorphicFacies_KanimblanTablelands.shp
+    - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polygons/MetamorphicFacies_Tabberabberan.shp
     intrusions: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polygons/Intrusions_Tabberabberan.shp
     rock_units: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polygons/RockUnits_LAO.shp
   magnetic: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Magnetic
@@ -41,13 +43,11 @@ dataset:
   remote_sensing: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Remote Sensing
   elevation: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Elevation/Gravmap2019-grid-dem_geoid.tif
   seismic: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Seismic/vs_cluster_boundaries.shp
-
 research_unit:
   type: point_local_environment
   train_positive: occurrence_points
   train_unlabeled: random_points_in_nsw_boundary
   prediction_grid_size: 0.05
-
 label:
   strategy: positive_unlabeled_as_zero
   positive_value: 1
@@ -59,49 +59,25 @@ label:
     SML: 0.2
     OCC: 0.1
     unlabeled: 0.5
-
 features:
-  operators:
-    - name: raster_statistics
-      params:
-        buffer_size: 10
-        buffer_shape: square
-    - name: texture
-      params:
-        buffer_size: 10
-    - name: elevation_gradient
-      params:
-        buffer_size: 10
-        buffer_shape: square
-    - name: line_distance
-      params:
-        distance_type: geodesic
-    - name: categorical_geology
-      params: {}
-
+  operators: []
 preprocess:
   correlation_threshold: 0.7
   categorical_encoding: onehot_ignore_unknown
   scaling: standard
-
 model:
   name: rf
   params:
     n_jobs: -1
-
 tuning:
   name: none
   params: {}
-
 label_refinement:
   enabled: false
-
 knowledge:
   enabled: false
-
 predicates:
   enabled: false
-
 validation:
   holdout:
     name: random_holdout
@@ -113,14 +89,13 @@ validation:
       n_splits: 10
       shuffle: false
   metrics:
-    - accuracy
-    - precision
-    - recall
-    - f1
-    - confusion_matrix
-    - roc_auc
+  - accuracy
+  - precision
+  - recall
+  - f1
+  - confusion_matrix
+  - roc_auc
   primary_metric: f1
-
 prediction:
   score_type: probability
   normalization: minmax

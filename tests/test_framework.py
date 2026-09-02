@@ -106,56 +106,76 @@ class FrameworkTests(unittest.TestCase):
     def setUp(self) -> None:
         load_builtin_components()
 
-    def test_config_load_migrates_phase1_yaml_to_phase2_spec(self) -> None:
+    def test_config_load_baseline_replay_spec(self) -> None:
         config = load_config(LACHLAN_CONFIG)
         self.assertEqual(config.name, "lachlan_rf_baseline")
+        self.assertEqual(config.spec.execution_mode, "archive_replay")
         self.assertEqual(config.spec.task.name, "target_area_prediction")
         self.assertEqual(config.spec.model.name, "rf")
-        self.assertEqual(config.spec.tuner.name, "bayes")
+        self.assertEqual(config.spec.tuner.name, "none")
         self.assertEqual(config.spec.holdout.name, "random_holdout")
         self.assertEqual(config.spec.cross_validation.name, "stratified_kfold")
-        self.assertEqual(
-            [item.name for item in config.spec.feature_operators],
-            ["raster_statistics", "texture", "elevation_gradient", "line_distance", "categorical_geology"],
-        )
-        phase2 = load_config(ROOT / "configs" / "experiments" / "lachlan_rf_phase2.yaml")
-        for section in (
-            "features",
-            "model",
-            "label_refinement",
-            "validation",
-            "research_unit",
-            "prediction",
-        ):
-            self.assertEqual(config.values[section], phase2.values[section])
-        # tuning 节在两个配置中参数值不同（n_iter 100 vs 1000），仅验证结构一致性
-        self.assertEqual(config.values["tuning"]["name"], phase2.values["tuning"]["name"])
-        self.assertIn("search_space", config.values["tuning"]["params"])
-        self.assertIn("search_space", phase2.values["tuning"]["params"])
+        self.assertEqual(list(config.spec.feature_operators), [])
+        self.assertIsNone(config.spec.label_refinement)
+
+    def test_phase1_config_migration_to_phase2_spec(self) -> None:
+        """P0-2: 一期配置迁移仍将 pu/search/features 转为二阶段结构。"""
+        from src.core.config import _migrate_phase1_config
+
+        phase1 = {
+            "experiment": {"name": "x", "output_dir": "outputs/x"},
+            "dataset": {"root": "."},
+            "model": {
+                "name": "rf",
+                "params": {"n_jobs": -1},
+                "pu": {"enabled": True},
+                "search": {
+                    "enabled": True,
+                    "n_iter": 100,
+                    "space": {
+                        "bootstrap": [True, False],
+                        "max_depth": [5, 20],
+                        "max_features": [None, "sqrt"],
+                        "min_samples_leaf": [2, 20],
+                        "min_samples_split": [2, 30],
+                        "n_estimators": [10, 200],
+                    },
+                },
+            },
+            "features": {"raster_statistics": True, "buffer_size": 10},
+            "validation": {"split": "random", "test_size": 0.25, "cv": 10, "scoring": "f1"},
+        }
+        migrated = _migrate_phase1_config(phase1)
+        self.assertEqual(migrated["model"]["name"], "rf")
+        self.assertEqual(migrated["tuning"]["name"], "bayes")
+        self.assertEqual(migrated["label_refinement"]["enabled"], True)
+        self.assertEqual(migrated["features"]["operators"][0]["name"], "raster_statistics")
+        self.assertEqual(migrated["validation"]["holdout"]["name"], "random_holdout")
 
     def test_config_validation_uses_registry_names_and_component_params(self) -> None:
-        config = load_config(LACHLAN_CONFIG)
-        invalid = copy.deepcopy(config.values)
+        gis_config = load_config(ROOT / "configs" / "experiments" / "lachlan_rf_raw_gis.yaml")
+
+        invalid = copy.deepcopy(gis_config.values)
         invalid["features"]["operators"][0]["params"]["buffer_size"] = 0
         with self.assertRaisesRegex(ConfigError, "buffer_size"):
             validate_config(invalid)
 
-        invalid = copy.deepcopy(config.values)
+        invalid = copy.deepcopy(gis_config.values)
         invalid["task"]["name"] = "not_a_task"
         with self.assertRaisesRegex(ConfigError, "Unknown task"):
             validate_config(invalid)
 
-        invalid = copy.deepcopy(config.values)
+        invalid = copy.deepcopy(gis_config.values)
         invalid["validation"]["metrics"].remove(invalid["validation"]["primary_metric"])
         with self.assertRaisesRegex(ConfigError, "primary_metric"):
             validate_config(invalid)
 
-        invalid = copy.deepcopy(config.values)
+        invalid = copy.deepcopy(gis_config.values)
         invalid["model"]["params"]["not_an_rf_parameter"] = True
         with self.assertRaises(ConfigError):
             validate_config(invalid)
 
-        invalid = copy.deepcopy(config.values)
+        invalid = copy.deepcopy(gis_config.values)
         invalid["knowledge"] = {
             "enabled": True,
             "items": [{"name": "empty", "params": {}}, {"name": "empty", "params": {}}],
@@ -172,20 +192,23 @@ class FrameworkTests(unittest.TestCase):
                     raise ValueError("dummy token rejected")
 
         SPLITTER_REGISTRY.register("dummy_holdout", DummyHoldout)
-        extended = copy.deepcopy(config.values)
+        extended = copy.deepcopy(gis_config.values)
         extended["validation"]["holdout"] = {
             "name": "dummy_holdout",
             "params": {"token": "accepted"},
         }
         validate_config(extended)
 
-        raw_gis = copy.deepcopy(config.values)
-        raw_gis["experiment"]["execution_mode"] = "raw_gis"
+        # raw_gis 不需要 archive_dir
+        raw_gis = copy.deepcopy(gis_config.values)
         raw_gis["dataset"].pop("archive_dir")
         validate_config(raw_gis)
 
-        archive = copy.deepcopy(raw_gis)
+        # archive_replay 需要 archive_dir（且禁止算子，需先清空）
+        archive = copy.deepcopy(gis_config.values)
         archive["experiment"]["execution_mode"] = "archive_replay"
+        archive["features"]["operators"] = []
+        archive["dataset"].pop("archive_dir")
         with self.assertRaisesRegex(ConfigError, "dataset.archive_dir"):
             validate_config(archive)
 
@@ -199,7 +222,7 @@ class FrameworkTests(unittest.TestCase):
             registry.create("missing")
 
     def test_feature_operator_pipeline_preserves_phase1_order(self) -> None:
-        config = load_config(LACHLAN_CONFIG).values
+        config = load_config(ROOT / "configs" / "experiments" / "lachlan_rf_raw_gis.yaml").values
         extractor = SpatialFeatureExtractor(config["dataset"], config["features"])
         extractor._legacy = FakeLegacyOperators()
         extractor.pipeline.context._raster_files_cache = ["synthetic.tif"]
@@ -543,7 +566,7 @@ class FrameworkTests(unittest.TestCase):
             self.assertEqual((actual_dir / "models" / "model_rf.pkl").read_bytes(), b"synthetic-model")
             self.assertEqual((actual_dir / "predictions" / "probability_map.tif").read_bytes(), b"synthetic-tiff")
             stored = json.loads((actual_dir / "manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual(stored["components"]["feature_operators"][0], "raster_statistics")
+            self.assertEqual(stored["components"]["feature_operators"], [])
             artifacts = stored["input_paths"]["archive_artifacts"]
             for filename in (
                 "Xy_train.csv",
@@ -581,10 +604,7 @@ class FrameworkTests(unittest.TestCase):
             self.assertEqual(manifest["components"]["tuner"], "none")
             self.assertEqual(manifest["components"]["knowledge"], ["empty"])
             self.assertEqual(manifest["components"]["predicates"], [])
-            self.assertEqual(
-                manifest["component_metadata"]["label_refinement_execution"],
-                "precomputed_in_archive",
-            )
+            self.assertEqual(manifest["components"]["label_refinement"], None)
             self.assertEqual(
                 manifest["component_metadata"]["holdout_execution"],
                 "precomputed_in_archive",
@@ -660,8 +680,8 @@ class FrameworkTests(unittest.TestCase):
         self.assertEqual(overridden.spec.seed, 123)
 
         # 覆盖布尔值
-        overridden = apply_cli_overrides(config, ["label_refinement.enabled=true"])
-        self.assertTrue(overridden.values["label_refinement"]["enabled"])
+        overridden = apply_cli_overrides(config, ["prediction.export_geotiff=false"])
+        self.assertFalse(overridden.values["prediction"]["export_geotiff"])
 
         # 多参数覆盖
         overridden = apply_cli_overrides(
@@ -733,16 +753,63 @@ class FrameworkTests(unittest.TestCase):
         phase2 = load_config(ROOT / "configs" / "experiments" / "lachlan_rf_phase2.yaml")
         self.assertEqual(phase2.values["experiment"]["execution_mode"], "train_from_archive_features")
 
-    def test_replay_mode_warns_on_unsupported_components(self) -> None:
-        """P0-1: archive_replay 模式配置了 tuning/label_refinement 时发出 Warning"""
+    def test_replay_mode_rejects_unsupported_components(self) -> None:
+        """P0-2: archive_replay 模式配置了 tuning 时验证失败（不再静默警告）。"""
         config = load_config(LACHLAN_CONFIG)
         values = copy.deepcopy(config.values)
-        values["experiment"]["execution_mode"] = "archive_replay"
         values["tuning"]["name"] = "bayes"
-        values["label_refinement"]["enabled"] = True
-        values["knowledge"]["enabled"] = True
-        values["predicates"]["enabled"] = True
-        with self.assertWarns(UserWarning):
+        with self.assertRaisesRegex(ConfigError, "archive_replay mode does not use tuning"):
+            validate_config(values)
+
+    def test_archive_features_mode_rejects_feature_operators(self) -> None:
+        """P0-2: train_from_archive_features 模式声明特征算子时验证失败。"""
+        phase2 = load_config(ROOT / "configs" / "experiments" / "lachlan_rf_phase2.yaml")
+        values = copy.deepcopy(phase2.values)
+        values["features"]["operators"] = [
+            {"name": "raster_statistics", "params": {"buffer_size": 10, "buffer_shape": "square"}}
+        ]
+        with self.assertRaisesRegex(ConfigError, "feature operators do not execute"):
+            validate_config(values)
+
+    def test_archive_features_mode_rejects_pub(self) -> None:
+        """P0-2: train_from_archive_features 模式启用 PUB 时验证失败。"""
+        phase2 = load_config(ROOT / "configs" / "experiments" / "lachlan_rf_phase2.yaml")
+        values = copy.deepcopy(phase2.values)
+        values["label_refinement"] = {
+            "enabled": True,
+            "name": "pub",
+            "params": {
+                "n_iter": 1,
+                "search_space": {
+                    "bootstrap": {"type": "categorical", "values": [True]},
+                    "max_depth": {"type": "integer", "low": 5, "high": 6},
+                    "max_features": {"type": "categorical", "values": ["sqrt"]},
+                    "min_samples_leaf": {"type": "integer", "low": 2, "high": 3},
+                    "min_samples_split": {"type": "integer", "low": 2, "high": 3},
+                    "n_estimators": {"type": "integer", "low": 10, "high": 11},
+                },
+            },
+        }
+        with self.assertRaisesRegex(ConfigError, "PUB label refinement does not execute"):
+            validate_config(values)
+
+    def test_strict_schema_rejects_unknown_keys(self) -> None:
+        """P0-2: 严格 schema 拒绝未知/拼写错误的配置键。"""
+        phase2 = load_config(ROOT / "configs" / "experiments" / "lachlan_rf_phase2.yaml")
+
+        values = copy.deepcopy(phase2.values)
+        values["model"]["paramz"] = {}
+        with self.assertRaisesRegex(ConfigError, "Unknown configuration key"):
+            validate_config(values)
+
+        values = copy.deepcopy(phase2.values)
+        values["label"]["strategy"] = "does_not_exist"
+        with self.assertRaisesRegex(ConfigError, "label.strategy"):
+            validate_config(values)
+
+        values = copy.deepcopy(phase2.values)
+        values["research_unit"]["train_positive"] = "does_not_exist"
+        with self.assertRaisesRegex(ConfigError, "train_positive"):
             validate_config(values)
 
     def test_spatial_block_kfold_requires_coordinates(self) -> None:

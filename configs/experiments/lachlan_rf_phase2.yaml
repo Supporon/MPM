@@ -1,5 +1,5 @@
 experiment:
-  name: lachlan_rf_phase2_test
+  name: lachlan_rf_phase2
   seed: 2026
   output_dir: outputs/lachlan_rf_phase2_test
   execution_mode: train_from_archive_features
@@ -62,23 +62,7 @@ label:
     OCC: 0.1
     unlabeled: 0.5
 features:
-  operators:
-  - name: raster_statistics
-    params:
-      buffer_size: 10
-      buffer_shape: square
-  - name: texture
-    params:
-      buffer_size: 10
-  - name: elevation_gradient
-    params:
-      buffer_size: 10
-      buffer_shape: square
-  - name: line_distance
-    params:
-      distance_type: geodesic
-  - name: categorical_geology
-    params: {}
+  operators: []
 preprocess:
   correlation_threshold: 0.7
   categorical_encoding: onehot_ignore_unknown
@@ -110,39 +94,7 @@ prediction:
   normalization: minmax
   export_geotiff: true
 label_refinement:
-  enabled: true
-  name: pub
-  params:
-    n_iter: 100
-    n_jobs: -1
-    search_space:
-      bootstrap:
-        type: categorical
-        values:
-        - true
-        - false
-      max_depth:
-        type: integer
-        low: 5
-        high: 20
-      max_features:
-        type: categorical
-        values:
-        - null
-        - sqrt
-        - log2
-      min_samples_leaf:
-        type: integer
-        low: 2
-        high: 20
-      min_samples_split:
-        type: integer
-        low: 2
-        high: 30
-      n_estimators:
-        type: integer
-        low: 10
-        high: 200
+  enabled: false
 knowledge:
   enabled: false
   items: []

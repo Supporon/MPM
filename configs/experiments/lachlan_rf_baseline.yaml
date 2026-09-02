@@ -1,8 +1,9 @@
+# 纯归档回放配置：逐字节复制归档模型与预测工件，不重新训练。
+# 回放模式禁止调参 / PUB / 知识 / 谓词 / 特征算子，故此处不声明这些节。
 experiment:
   name: lachlan_rf_baseline
   seed: 42
   output_dir: outputs/lachlan_rf_baseline
-  # 安全默认值：保留归档基线，不重新训练。
   execution_mode: archive_replay
 
 task:
@@ -12,91 +13,11 @@ task:
 dataset:
   root: ../EarthByte-MPM_Lachlan_Porphyry
   archive_dir: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Outputs_Cu_Lachlan_v1.6
-  occurrence: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Mineral Occurrences/MinView/GSNSWDataset/porphyry.shp
-  boundary: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Frames/Lachlan_Boundary_edited.shp
-  # 保持 Notebook 行为：以 Lachlan 为预测目标，随机未标注样本则使用 NSW 范围。
-  training_boundary: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Frames/NSW_Boundary/NSW_STATE_POLYGON_shp_GDA94_NoIsland_ACT.shp
-  geology:
-    line_files:
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/IntrusionsBndys_FaultedBndys.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/IntrusionsBndys_GeologicalBndys.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/IntrusionsBndys_IntrusiveBndys.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/IntrusionsBndys_UnconformableBndys.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/MetamorphicBoundaries_Faults.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/MetamorphicBoundaries_GeologicalBndys.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/MetamorphicBoundaries_MetamorphicBndys.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/MetamorphicBoundaries_Unconformities.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/RockUnitBndyFaults_LAO_Faulted boundary.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/RockUnitBndyFaults_LAO_Geological boundary.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/RockUnitBndyFaults_LAO_Intrusive boundary.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/RockUnitBndyFaults_LAO_Unconformable boundary.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polylines/MetamorphicIsograds.shp
-    metamorphic_facies:
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polygons/MetamorphicFacies_Benambran.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polygons/MetamorphicFacies_KanimblanTablelands.shp
-      - ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polygons/MetamorphicFacies_Tabberabberan.shp
-    intrusions: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polygons/Intrusions_Tabberabberan.shp
-    rock_units: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Geology/Polygons/RockUnits_LAO.shp
-  magnetic: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Magnetic
-  gravity: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Gravity
-  radiometric: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Radiometric
-  remote_sensing: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Remote Sensing
-  elevation: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Elevation/Gravmap2019-grid-dem_geoid.tif
-  seismic: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Seismic/vs_cluster_boundaries.shp
-
-research_unit:
-  type: point_local_environment
-  train_positive: occurrence_points
-  train_unlabeled: random_points_in_nsw_boundary
-  prediction_grid_size: 0.05
-
-label:
-  strategy: positive_unlabeled_as_zero
-  positive_value: 1
-  unlabeled_value: 0
-  sample_weight:
-    VLG: 0.5
-    LGE: 0.4
-    MED: 0.3
-    SML: 0.2
-    OCC: 0.1
-    unlabeled: 0.5
-
-features:
-  line_distance: true
-  categorical: true
-  raster_statistics: true
-  texture: true
-  gradient: true
-  buffer_size: 10
-
-preprocess:
-  correlation_threshold: 0.7
-  categorical_encoding: onehot_ignore_unknown
-  scaling: standard
 
 model:
   name: rf
   params:
     n_jobs: -1
-  pu:
-    enabled: true
-  search:
-    enabled: true
-    n_iter: 100
-    space:
-      bootstrap: [true, false]
-      max_depth: [5, 20]
-      max_features: [null, sqrt, log2]
-      min_samples_leaf: [2, 20]
-      min_samples_split: [2, 30]
-      n_estimators: [10, 200]
-
-validation:
-  split: random
-  test_size: 0.25
-  cv: 10
-  scoring: f1
 
 prediction:
   score_type: probability

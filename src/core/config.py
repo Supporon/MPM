@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import importlib
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -57,13 +56,9 @@ DEFAULTS: dict[str, Any] = {
         },
     },
     "features": {
-        "operators": [
-            {"name": "raster_statistics", "params": {"buffer_size": 10, "buffer_shape": "square"}},
-            {"name": "texture", "params": {"buffer_size": 10}},
-            {"name": "elevation_gradient", "params": {"buffer_size": 10, "buffer_shape": "square"}},
-            {"name": "line_distance", "params": {"distance_type": "geodesic"}},
-            {"name": "categorical_geology", "params": {}},
-        ]
+        # 默认不声明算子：archive_replay / train_from_archive_features 禁止算子，
+        # raw_gis 配置需显式声明。避免默认值在“不生效”的执行模式下被静默忽略。
+        "operators": [],
     },
     "preprocess": {
         "correlation_threshold": 0.7,
@@ -90,6 +85,17 @@ DEFAULTS: dict[str, Any] = {
     },
     "prediction": {"score_type": "probability", "normalization": "minmax", "export_geotiff": True},
 }
+
+
+# 顶层允许的配置节（严格 schema 用于拒绝未知/拼写错误的顶层键）。
+_KNOWN_SECTIONS = set(DEFAULTS) | {"dataset"}
+
+# 已实现的研究变量枚举。注册化（P1-1）完成后这些将被注册表取代，
+# 目前先用于拒绝 "does_not_exist" 一类的无效值，避免静默忽略。
+_KNOWN_RESEARCH_UNIT_TYPES = {"point_local_environment"}
+_KNOWN_TRAIN_POSITIVE = {"occurrence_points"}
+_KNOWN_TRAIN_UNLABELED = {"random_points_in_nsw_boundary"}
+_KNOWN_LABEL_STRATEGIES = {"positive_unlabeled_as_zero"}
 
 
 def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
@@ -358,6 +364,8 @@ def validate_config(config: Mapping[str, Any]) -> None:
     if config["experiment"]["execution_mode"] not in {"archive_replay", "train_from_archive_features", "raw_gis"}:
         raise ConfigError("experiment.execution_mode must be archive_replay, train_from_archive_features, or raw_gis")
 
+    _validate_strict_schema(config)
+
     try:
         TASK_REGISTRY.require(config["task"]["name"])
         TASK_REGISTRY.validate(
@@ -423,40 +431,103 @@ def validate_config(config: Mapping[str, Any]) -> None:
     if config["experiment"]["execution_mode"] in {"archive_replay", "train_from_archive_features"}:
         _require(config, "dataset.archive_dir")
 
-    if config["experiment"]["execution_mode"] == "archive_replay":
-        _warn_replay_mode_constraints(config)
+    _validate_mode_capabilities(config)
 
 
-def _warn_replay_mode_constraints(config: Mapping[str, Any]) -> None:
-    """对回放模式下配置了不支持的组件发出警告，不阻断加载。"""
-    if config.get("tuning", {}).get("name", "none") != "none":
-        warnings.warn(
-            f"archive_replay mode does not use tuning, but tuning.name={config['tuning']['name']} "
-            "is configured. The tuning configuration will be ignored.",
-            UserWarning,
-            stacklevel=2,
+def _reject_unknown_keys(
+    mapping: Mapping[str, Any],
+    allowed: set[str],
+    context: str,
+) -> None:
+    """拒绝未知键，避免拼写错误或未实现字段被静默忽略。"""
+    unknown = sorted(set(mapping) - allowed)
+    if unknown:
+        raise ConfigError(
+            f"Unknown configuration key(s) in {context}: {unknown}. "
+            f"Allowed keys: {sorted(allowed)}"
         )
-    if config.get("label_refinement", {}).get("enabled", False):
-        warnings.warn(
-            "archive_replay mode does not support label refinement. "
-            "The label_refinement configuration will be ignored.",
-            UserWarning,
-            stacklevel=2,
+
+
+def _validate_strict_schema(config: Mapping[str, Any]) -> None:
+    """严格 schema：拒绝顶层、model、research_unit、label 的未知键。"""
+    _reject_unknown_keys(config, _KNOWN_SECTIONS, "top level")
+    _reject_unknown_keys(config["model"], {"name", "params"}, "model")
+    _reject_unknown_keys(
+        config["research_unit"],
+        {"type", "train_positive", "train_unlabeled", "prediction_grid_size"},
+        "research_unit",
+    )
+    _reject_unknown_keys(
+        config["label"],
+        {"strategy", "positive_value", "unlabeled_value", "sample_weight"},
+        "label",
+    )
+
+    research_unit = config["research_unit"]
+    if research_unit["type"] not in _KNOWN_RESEARCH_UNIT_TYPES:
+        raise ConfigError(
+            f"research_unit.type={research_unit['type']!r} is not implemented; "
+            f"available: {sorted(_KNOWN_RESEARCH_UNIT_TYPES)}"
         )
-    if config.get("knowledge", {}).get("enabled", False):
-        warnings.warn(
-            "archive_replay mode does not support knowledge injection. "
-            "The knowledge configuration will be ignored.",
-            UserWarning,
-            stacklevel=2,
+    if research_unit["train_positive"] not in _KNOWN_TRAIN_POSITIVE:
+        raise ConfigError(
+            f"research_unit.train_positive={research_unit['train_positive']!r} is not implemented; "
+            f"available: {sorted(_KNOWN_TRAIN_POSITIVE)}"
         )
-    if config.get("predicates", {}).get("enabled", False):
-        warnings.warn(
-            "archive_replay mode does not support predicate constraints. "
-            "The predicates configuration will be ignored.",
-            UserWarning,
-            stacklevel=2,
+    if research_unit["train_unlabeled"] not in _KNOWN_TRAIN_UNLABELED:
+        raise ConfigError(
+            f"research_unit.train_unlabeled={research_unit['train_unlabeled']!r} is not implemented; "
+            f"available: {sorted(_KNOWN_TRAIN_UNLABELED)}"
         )
+    if config["label"]["strategy"] not in _KNOWN_LABEL_STRATEGIES:
+        raise ConfigError(
+            f"label.strategy={config['label']['strategy']!r} is not implemented; "
+            f"available: {sorted(_KNOWN_LABEL_STRATEGIES)}"
+        )
+
+
+def _validate_mode_capabilities(config: Mapping[str, Any]) -> None:
+    """按执行模式拒绝不生效的配置（配置必须产生行为）。"""
+    mode = config["experiment"]["execution_mode"]
+
+    if mode == "archive_replay":
+        if config["tuning"]["name"] != "none":
+            raise ConfigError(
+                "archive_replay mode does not use tuning; set tuning.name=none "
+                "or use a training execution mode."
+            )
+        if config["label_refinement"]["enabled"]:
+            raise ConfigError(
+                "archive_replay mode replays archived artifacts and cannot re-run "
+                "label refinement (PUB); disable label_refinement."
+            )
+        if config["knowledge"]["enabled"]:
+            raise ConfigError(
+                "archive_replay mode does not support knowledge injection; disable knowledge."
+            )
+        if config["predicates"]["enabled"]:
+            raise ConfigError(
+                "archive_replay mode does not support predicate constraints; disable predicates."
+            )
+        if config["features"]["operators"]:
+            raise ConfigError(
+                "archive_replay mode does not run feature operators; set features.operators=[]."
+            )
+        return
+
+    if mode == "train_from_archive_features":
+        if config["label_refinement"]["enabled"]:
+            raise ConfigError(
+                "train_from_archive_features mode uses precomputed archive labels; "
+                "PUB label refinement does not execute. Disable label_refinement "
+                "or use raw_gis mode."
+            )
+        if config["features"]["operators"]:
+            raise ConfigError(
+                "train_from_archive_features mode uses archived features; feature "
+                "operators do not execute. Set features.operators=[] or use raw_gis mode."
+            )
+        return
 
 
 def load_config(path: str | Path) -> ExperimentConfig:
