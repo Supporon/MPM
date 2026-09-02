@@ -42,6 +42,10 @@ from src.models.registry import MODEL_REGISTRY, fit_params_for
 from src.predicates.pipeline import PredicatePipeline
 from src.predicates.registry import PREDICATE_REGISTRY
 
+import pytest
+
+pytest.importorskip("torch")
+
 
 def _make_synthetic_data(
     n_samples: int = 200, n_features: int = 10, seed: int = 42
@@ -389,7 +393,10 @@ def test_predicate_pipeline():
         [ComponentSpec("all_ones", {}), ComponentSpec("spatial_box", {})]
     )
     result = pipeline.apply(data, {})
-    assert "phi_vector" in result.constraints
+    # 多个 constraint 谓词应合并为 phi_vectors，而非后者覆盖前者
+    assert "phi_vectors" in result.constraints
+    names = [v["name"] for v in result.constraints["phi_vectors"]]
+    assert names == ["all_ones", "spatial_box"]
     assert "all_ones" in result.metadata.get("predicates_applied", ())
     assert "spatial_box" in result.metadata.get("predicates_applied", ())
     print("  ✓ PredicatePipeline 顺序执行正确")

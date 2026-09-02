@@ -76,6 +76,13 @@ class BayesTuner:
             from skopt import BayesSearchCV
         except ImportError as error:
             raise OptionalDependencyError("Bayesian tuning requires scikit-optimize (skopt).") from error
+        if data.constraints:
+            raise ValueError(
+                "Bayesian tuning with predicate constraints is not yet supported: "
+                "BayesSearchCV slices X/y per fold but cannot slice the constraint "
+                "phi vectors to match each fold. Use tuning.name=none with "
+                "constraint-supporting models, or a constraint-aware CV splitter."
+            )
         model = model_adapter.build(model_params, seed)
         search_space = build_bayes_search_space(tuning_params.get("search_space", {}))
         n_iter = int(tuning_params.get("n_iter", 50))

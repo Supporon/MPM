@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Iterable, Mapping
 
 from ..core.bootstrap import load_builtin_components
@@ -56,12 +57,40 @@ class PredicatePipeline:
                     f"Predicate '{predicate.name}' changed row count; "
                     f"row-changing predicates require an explicit resampling contract"
                 )
-        # Phase 2: 约束谓词（生成 phi 向量）
-        for predicate in self.constraint_predicates:
+
+        # Phase 2: 约束谓词（生成 φ 向量）
+        constraint_preds = self.constraint_predicates
+        if len(constraint_preds) <= 1:
+            for predicate in constraint_preds:
+                result = predicate.apply(result, context)
+                if len(result.features) != len(data.features):
+                    raise ValueError(
+                        f"Predicate '{predicate.name}' changed row count; "
+                        f"row-changing predicates require an explicit resampling contract"
+                    )
+            return result
+
+        # 多个约束谓词：分别应用并收集各自的 φ，避免都写入 phi_vector 时后一个覆盖前一个
+        collected: list[dict] = []
+        for predicate in constraint_preds:
             result = predicate.apply(result, context)
             if len(result.features) != len(data.features):
                 raise ValueError(
                     f"Predicate '{predicate.name}' changed row count; "
                     f"row-changing predicates require an explicit resampling contract"
                 )
-        return result
+            if "phi_vector" in result.constraints:
+                collected.append(
+                    {"name": predicate.name, "vector": result.constraints["phi_vector"]}
+                )
+            elif "phi_vectors" in result.constraints:
+                collected.extend(result.constraints["phi_vectors"])
+
+        # 清理过程中残留的 phi_vector/phi_vectors，统一为合并后的 phi_vectors
+        final_constraints = {
+            key: value
+            for key, value in result.constraints.items()
+            if key not in {"phi_vector", "phi_vectors"}
+        }
+        final_constraints["phi_vectors"] = collected
+        return replace(result, constraints=final_constraints)

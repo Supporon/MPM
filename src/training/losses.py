@@ -40,6 +40,7 @@ def weighted_mse_with_predicate(
     phi: "torch.Tensor",
     tau_hat: "torch.Tensor",
     tau: "torch.Tensor",
+    sample_weight: "torch.Tensor | None" = None,
 ) -> dict[str, "torch.Tensor"]:
     """TSIL 风格的加权 MSE 损失。
 
@@ -47,7 +48,7 @@ def weighted_mse_with_predicate(
         loss = τ̂ · MSE + τ · (1/N) · (φ̃ᵀ e)²
 
     其中 P_loss = (1/N) · (φ̃ᵀ e)² 等价于 (1/N) · eᵀ P e，
-    P = φ̃ φ̃ᵀ 是投影矩阵。
+    P = φ̃ φ̃ᵀ 是投影矩阵。``sample_weight`` 应用于个体误差项 MSE。
 
     Args:
         pred: 预测概率值（已通过 sigmoid），shape [N]
@@ -55,6 +56,7 @@ def weighted_mse_with_predicate(
         phi: 谓词描述向量，shape [N] 或 [N, d]
         tau_hat: I 项权重（保留个体误差）
         tau: P 项权重（统计不变量）
+        sample_weight: 逐样本权重，shape [N]；None 表示等权。
 
     Returns:
         dict with 'total', 'mse', 'v_loss', 'p_loss', 'p_loss_raw'
@@ -62,7 +64,11 @@ def weighted_mse_with_predicate(
     e = pred - target  # [N]
     N = e.shape[0]
 
-    mse = (e**2).mean()
+    if sample_weight is not None:
+        w = sample_weight
+        mse = (w * e**2).sum() / w.sum()
+    else:
+        mse = (e**2).mean()
 
     # 归一化 φ 并计算 P 项
     if phi.dim() == 1:

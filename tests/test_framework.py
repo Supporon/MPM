@@ -1113,6 +1113,47 @@ class FrameworkTests(unittest.TestCase):
             prediction_rate_auc(random_scores, random_labels, random_area), 0.5, delta=0.05
         )
 
+    def test_multiple_constraint_predicates_merge_phi_vectors(self) -> None:
+        """P1-2: 多个 constraint 谓词合并为 phi_vectors，不互相覆盖。"""
+        data = TrainingData(
+            pd.DataFrame({"a": [0.0, 1.0, 2.0, 3.0]}),
+            pd.Series([0, 1, 0, 1]),
+            pd.Series([1.0, 1.0, 1.0, 1.0]),
+            metadata={
+                "units": pd.DataFrame({"X": [0.0, 1.0, 10.0, 11.0], "Y": [0.0, 1.0, 10.0, 11.0]})
+            },
+        )
+        pipeline = PredicatePipeline([ComponentSpec("all_ones"), ComponentSpec("spatial_box")])
+        result = pipeline.apply(data, {"knowledge": {}})
+        self.assertIn("phi_vectors", result.constraints)
+        self.assertNotIn("phi_vector", result.constraints)
+        names = [vector["name"] for vector in result.constraints["phi_vectors"]]
+        self.assertEqual(names, ["all_ones", "spatial_box"])
+        for vector in result.constraints["phi_vectors"]:
+            self.assertEqual(len(vector["vector"]), 4)
+
+    def test_weighted_mse_applies_sample_weight(self) -> None:
+        """P1-2: TSIL 谓词损失的 MSE 项应用 sample_weight。"""
+        try:
+            import torch
+        except ImportError:  # pragma: no cover
+            self.skipTest("torch not installed")
+        from src.training.losses import weighted_mse_with_predicate
+
+        pred = torch.tensor([0.0, 0.9, 0.0, 0.0])
+        target = torch.zeros(4)
+        phi = torch.ones(4)
+        tau_hat = torch.tensor(0.5)
+        tau = torch.tensor(0.5)
+
+        unweighted = weighted_mse_with_predicate(pred, target, phi, tau_hat, tau)
+        weighted = weighted_mse_with_predicate(
+            pred, target, phi, tau_hat, tau,
+            sample_weight=torch.tensor([0.0, 10.0, 0.0, 0.0]),
+        )
+        self.assertAlmostEqual(unweighted["mse"].item(), 0.2025, places=5)
+        self.assertAlmostEqual(weighted["mse"].item(), 0.81, places=5)
+
     def test_deep_edge_task_is_registered_but_explicitly_unavailable(self) -> None:
         with self.assertRaises(TaskCapabilityError):
             create_task(

@@ -1,0 +1,30 @@
+# MLP 基线：从归档特征训练多层感知机。
+# 约束谓词（TSIL 加权损失）需 tuning.name=none（贝叶斯搜索尚不能按折切分 φ）。
+experiment:
+  name: lachlan_mlp
+  seed: 42
+  output_dir: outputs/lachlan_mlp
+  execution_mode: train_from_archive_features
+
+task:
+  name: target_area_prediction
+  region: lachlan
+
+dataset:
+  root: ../EarthByte-MPM_Lachlan_Porphyry
+  archive_dir: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Outputs_Cu_Lachlan_v1.6
+
+model:
+  name: mlp
+  params:
+    hidden_layers: [64, 32]
+    n_epochs: 100
+    batch_size: 64
+    learning_rate: 0.001
+    dropout: 0.3
+    device: cpu
+
+prediction:
+  score_type: relative_score
+  normalization: minmax
+  export_geotiff: false

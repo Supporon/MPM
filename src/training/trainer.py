@@ -190,7 +190,7 @@ class TorchTrainingLoop:
                     tau_hat = torch.sigmoid(model.alpha)
                     tau = 1 - tau_hat
                     loss_dict = weighted_mse_with_predicate(
-                        pred_prob, batch_y, batch_phi, tau_hat, tau
+                        pred_prob, batch_y, batch_phi, tau_hat, tau, sample_weight=batch_w
                     )
                     loss = loss_dict["total"]
                 else:
