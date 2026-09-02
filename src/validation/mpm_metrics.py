@@ -84,3 +84,36 @@ def prediction_rate_auc(scores, labels, unit_area) -> float:
     area_grid, capture_grid = prediction_rate_curve(scores, labels, unit_area)
     trapezoid = getattr(np, "trapezoid", None) or getattr(np, "trapz")
     return float(trapezoid(capture_grid, area_grid))
+
+
+def _metric_key(prefix: str, value: float) -> str:
+    """把小数占比转为稳定的指标键名，如 0.05 -> 0_05、0.10 -> 0_10。"""
+    return f"{prefix}_{value:.2f}".replace(".", "_")
+
+
+def evaluate_mpm_metrics(
+    scores,
+    labels,
+    unit_area,
+    *,
+    area_fractions: tuple[float, ...] = (0.01, 0.05, 0.10),
+    capture_rates: tuple[float, ...] = (0.50, 0.80, 0.90),
+) -> dict[str, float]:
+    """计算一组标准 MPM 面积捕获指标，返回可直接写入 metrics 的 dict。
+
+    包含：
+    - ``capture_rate_at_area_<frac>``：给定面积占比下的正类捕获率；
+    - ``area_fraction_at_capture_<rate>``：捕获给定比例正类所需面积占比；
+    - ``prediction_rate_auc``：prediction-rate curve 的 AUC。
+    """
+    result: dict[str, float] = {}
+    for frac in area_fractions:
+        result[_metric_key("capture_rate_at_area", frac)] = capture_rate_at_area_fraction(
+            scores, labels, unit_area, frac
+        )
+    for rate in capture_rates:
+        result[_metric_key("area_fraction_at_capture", rate)] = area_fraction_at_capture_rate(
+            scores, labels, unit_area, rate
+        )
+    result["prediction_rate_auc"] = prediction_rate_auc(scores, labels, unit_area)
+    return result

@@ -101,6 +101,7 @@ def evaluate_classifier(
     labels,
     sample_weight,
     metric_names: list[str] | tuple[str, ...] | None = None,
+    unit_area=None,
 ) -> dict[str, Any]:
     predictions = model.predict(features)
     probabilities = model.predict_proba(features)[:, 1]
@@ -111,4 +112,9 @@ def evaluate_classifier(
         value = metric(labels, predictions, probabilities, sample_weight)
         if value is not None:
             result[name] = value
+    # MPM 面积捕获指标：仅在提供了每个预测单元的面积时计算
+    if unit_area is not None:
+        from .mpm_metrics import evaluate_mpm_metrics
+
+        result.update(evaluate_mpm_metrics(probabilities, labels, unit_area))
     return result

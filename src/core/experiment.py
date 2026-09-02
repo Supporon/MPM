@@ -374,6 +374,7 @@ class Experiment:
                 evaluation.labels,
                 evaluation.sample_weight,
                 self.spec.metrics,
+                unit_area=evaluation.metadata.get("unit_area"),
             )
             self.metrics["mode"] = self.mode
             self.metrics["primary_metric"] = self.spec.primary_metric
