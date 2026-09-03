@@ -23,7 +23,7 @@ class PredicatePipeline:
 
     谓词分为两类：
     - ``data_transform``：修改标签、权重或特征（如 positive_constraint、weight_adjustment）
-    - ``constraint``：生成 phi 向量，通过 constraints 传递给支持 TSIL 的模型
+    - ``constraint``：生成 phi 向量，通过 constraints 传递给支持 LUSI 谓词约束的模型
       （如 all_ones、spatial_box、spatial_distance、combined）
 
     执行顺序保证 data_transform 先于 constraint，确保约束基于最终变换后的数据。

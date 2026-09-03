@@ -1,11 +1,11 @@
-"""TSIL 风格的内置 Predicate 实现。
+"""LUSI 风格的内置 Predicate 实现。
 
 谓词按 kind 分为两类：
 
-A. **constraint 谓词**（kind="constraint"）— 生成 φ 向量用于 TSIL 加权损失
+A. **constraint 谓词**（kind="constraint"）— 生成 φ 向量用于 LUSI 加权损失
    1. **all_ones** (Φ_ones 控制谓词):
       - 为所有样本生成 φ = 1 的向量
-      - 对应 TSIL 中的全 1 控制谓词
+      - 对应 LUSI 中的全 1 控制谓词
       - 用于验证加权损失框架的正确性
 
    2. **spatial_box** (空间选框谓词):
@@ -28,7 +28,7 @@ B. **data_transform 谓词**（kind="data_transform"）— 修改标签/权重
 管线执行顺序：data_transform 先于 constraint，
 确保约束基于最终变换后的数据生成。
 
-数学原理（参考 TSIL 论文）:
+数学原理（参考 Vapnik & Izmailov 的 LUSI；实现参考 TSIL）:
     φ 向量 → L2 归一化 φ̃ = φ / ||φ||
     P = φ̃ φ̃ᵀ（投影矩阵）
     loss = τ̂ · MSE + τ · (1/N) · ||φ̃ᵀ e||²
@@ -94,7 +94,7 @@ def _get_coordinates(data: TrainingData) -> np.ndarray | None:
 class AllOnesPredicate:
     """全 1 谓词（Φ_ones 控制谓词）。
 
-    为所有样本生成 φ = 1 的向量。这是 TSIL 中的控制谓词，
+    为所有样本生成 φ = 1 的向量。这是 LUSI 中的控制谓词，
     用于验证加权损失框架的正确性。
 
     当 φ = [1, 1, ..., 1]ᵀ 时：

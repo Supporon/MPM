@@ -1,11 +1,14 @@
-"""TSIL 风格的加权损失函数。
+"""LUSI（Learning Using Statistical Invariants）谓词约束加权损失函数。
+
+理论框架是 Vapnik & Izmailov 的 LUSI——通过谓词（predicate）将数据中
+应满足的统计不变量引入学习目标；实现形式参考 TSIL。
 
 提供所有深度学习模型可复用的谓词约束损失函数：
 - φ 向量 L2 归一化
-- TSIL 加权 MSE 损失（τ̂·MSE + τ·P_loss）
+- LUSI 加权 MSE 损失（τ̂·MSE + τ·P_loss）
 - 从 TrainingData constraints 构建合并的 φ 向量
 
-数学原理（参考 TSIL 论文）:
+数学原理（Vapnik & Izmailov 的 LUSI；实现参考 TSIL）:
     φ 向量 → L2 归一化 φ̃ = φ / ||φ||
     P = φ̃ φ̃ᵀ（投影矩阵）
     loss = τ̂ · MSE + τ · (1/N) · ||φ̃ᵀ e||²
@@ -30,7 +33,7 @@ except ImportError:
 
 
 def _normalize_phi(phi: "torch.Tensor") -> "torch.Tensor":
-    """L2 归一化 φ 向量，匹配 TSIL 论文中的 Φ̃ = Φ / ||Φ||。"""
+    """L2 归一化 φ 向量，匹配 LUSI 中的 Φ̃ = Φ / ||Φ||。"""
     return phi / (torch.linalg.norm(phi) + 1e-8)
 
 
@@ -42,7 +45,7 @@ def weighted_mse_with_predicate(
     tau: "torch.Tensor",
     sample_weight: "torch.Tensor | None" = None,
 ) -> dict[str, "torch.Tensor"]:
-    """TSIL 风格的加权 MSE 损失。
+    """LUSI 谓词约束加权 MSE 损失。
 
     数学形式：
         loss = τ̂ · MSE + τ · (1/N) · (φ̃ᵀ e)²

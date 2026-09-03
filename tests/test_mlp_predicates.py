@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MLP 模型和 TSIL 风格谓词的验证测试。
+"""MLP 模型和 LUSI 风格谓词的验证测试。
 
 测试覆盖：
 1. MLP 模型适配器注册、构建、配置校验
@@ -584,7 +584,7 @@ def test_constraint_phi_length_validation():
 if __name__ == "__main__":
     import torch
     print("=" * 70)
-    print("MLP + TSIL 风格谓词验证测试")
+    print("MLP + LUSI 风格谓词验证测试")
     print(f"PyTorch 版本: {torch.__version__}")
     print("=" * 70)
 

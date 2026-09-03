@@ -6,7 +6,7 @@
 设计原则：
 - 无状态工具类：每次 fit() 调用是独立的
 - 不包装模型：接收 nn.Module 并在其上就地训练，保持 sklearn 兼容性
-- 双模式：标准模式（BCE/CrossEntropy）和谓词模式（TSIL 加权 MSE）
+- 双模式：标准模式（BCE/CrossEntropy）和谓词模式（LUSI 加权 MSE）
 """
 
 from __future__ import annotations
@@ -185,7 +185,7 @@ class TorchTrainingLoop:
                 logits = model(batch_X).squeeze(-1)  # [B]
 
                 if has_constraints and batch_phi is not None:
-                    # TSIL 谓词模式：sigmoid 概率 → 加权 MSE
+                    # LUSI 谓词模式：sigmoid 概率 → 加权 MSE
                     pred_prob = torch.sigmoid(logits)
                     tau_hat = torch.sigmoid(model.alpha)
                     tau = 1 - tau_hat

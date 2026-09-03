@@ -1,5 +1,5 @@
 # MLP 基线：从归档特征训练多层感知机。
-# 约束谓词（TSIL 加权损失）需 tuning.name=none（贝叶斯搜索尚不能按折切分 φ）。
+# 约束谓词（LUSI 加权损失）需 tuning.name=none（贝叶斯搜索尚不能按折切分 φ）。
 experiment:
   name: lachlan_mlp
   seed: 42

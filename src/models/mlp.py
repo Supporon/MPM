@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""基于 PyTorch 的 MLP 模型适配器，支持 TSIL 风格的谓词约束加权损失。
+"""基于 PyTorch 的 MLP 模型适配器，支持 LUSI 谓词约束加权损失。
 
 将表格特征通过多层全连接网络进行二分类，支持通过谓词约束
 （Predicate constraints）在损失函数中引入样本间的统计不变量。
+理论框架为 Vapnik & Izmailov 的 LUSI（Learning Using Statistical
+Invariants），实现形式参考 TSIL。
 
-TSIL 风格的加权损失：
+LUSI 加权损失：
     loss = τ̂ · MSE + τ · (1/N) · (φ̃ᵀ e)²
 
 其中 φ̃ 是 L2 归一化后的谓词描述向量，e = sigmoid(logits) - target 是
@@ -50,7 +52,7 @@ def _require_torch() -> None:
 
 
 # ============================================================================
-# TSIL 风格加权损失函数 — 从共享 training 模块重新导出
+# LUSI 谓词约束加权损失函数 — 从共享 training 模块重新导出
 # ============================================================================
 
 # 重新导出以保持向后兼容性；规范位置在 src.training.losses
@@ -133,14 +135,14 @@ if _TORCH_AVAILABLE:
 
 
 class MLPClassifier(BaseEstimator, ClassifierMixin):
-    """sklearn 兼容的 MLP 分类器，支持 TSIL 风格谓词约束。
+    """sklearn 兼容的 MLP 分类器，支持 LUSI 谓词约束。
 
     封装 PyTorch 训练循环，支持 sample_weight 和谓词约束。
     与 get_params/set_params 兼容，可用于 BayesSearchCV 超参数搜索。
 
     训练模式：
     - 无谓词约束：使用 BCEWithLogitsLoss（标准二分类）
-    - 有谓词约束：使用 TSIL 加权 MSE（在 sigmoid 概率上计算）
+    - 有谓词约束：使用 LUSI 加权 MSE（在 sigmoid 概率上计算）
 
     Parameters
     ----------
@@ -403,7 +405,7 @@ class MLPClassifier(BaseEstimator, ClassifierMixin):
 class MLPAdapter:
     """MLP 模型适配器，将 PyTorch MLP 集成到 MPM 实验框架。
 
-    支持谓词约束（predicate constraints），通过 TSIL 风格的加权损失
+    支持谓词约束（predicate constraints），通过 LUSI 谓词约束加权损失
     在训练中引入样本间的统计不变量。
 
     Attributes

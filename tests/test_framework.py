@@ -1133,7 +1133,7 @@ class FrameworkTests(unittest.TestCase):
             self.assertEqual(len(vector["vector"]), 4)
 
     def test_weighted_mse_applies_sample_weight(self) -> None:
-        """P1-2: TSIL 谓词损失的 MSE 项应用 sample_weight。"""
+        """P1-2: LUSI 谓词损失的 MSE 项应用 sample_weight。"""
         try:
             import torch
         except ImportError:  # pragma: no cover

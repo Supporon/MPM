@@ -1,7 +1,7 @@
-"""共享训练模块 — TSIL 风格损失函数与 PyTorch 训练循环。
+"""共享训练模块 — LUSI 谓词约束损失函数与 PyTorch 训练循环。
 
 提供所有深度学习模型可复用的：
-- TSIL 加权 MSE 损失函数
+- LUSI 加权 MSE 损失函数（谓词约束）
 - 谓词 φ 向量构建与归一化
 - PyTorch 训练循环（DataLoader → epoch → batch → loss → backward）
 """
