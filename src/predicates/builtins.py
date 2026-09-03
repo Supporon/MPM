@@ -184,18 +184,36 @@ class SpatialBoxPredicate:
         x_coords = coords[:, 0]
         y_coords = coords[:, 1]
 
+        # 优先从知识上下文消费 spatial_extent 的研究区域先验范围，
+        # 否则回退到从当前数据坐标重新估计。
+        extent = None
+        knowledge = context.get("knowledge", {})
+        spatial_knowledge = knowledge.get("spatial_extent", {})
+        if isinstance(spatial_knowledge, Mapping) and "bounds" in spatial_knowledge:
+            extent = spatial_knowledge
+
         # 自动计算中心和边长
         if self.auto_center:
-            center_x = float(np.median(x_coords))
-            center_y = float(np.median(y_coords))
+            if extent is not None and "center" in extent:
+                center_x = float(extent["center"]["x"])
+                center_y = float(extent["center"]["y"])
+            else:
+                center_x = float(np.median(x_coords))
+                center_y = float(np.median(y_coords))
         else:
             center_x = self.center_x
             center_y = self.center_y
 
         if self.auto_side:
-            x_range = x_coords.max() - x_coords.min()
-            y_range = y_coords.max() - y_coords.min()
-            side_length = float(min(x_range, y_range) * 0.5)
+            if extent is not None and "bounds" in extent:
+                bounds = extent["bounds"]
+                x_range = bounds["max_x"] - bounds["min_x"]
+                y_range = bounds["max_y"] - bounds["min_y"]
+                side_length = float(min(x_range, y_range) * 0.5)
+            else:
+                x_range = x_coords.max() - x_coords.min()
+                y_range = y_coords.max() - y_coords.min()
+                side_length = float(min(x_range, y_range) * 0.5)
         else:
             side_length = self.side_length
 

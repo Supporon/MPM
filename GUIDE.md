@@ -14,6 +14,7 @@
 10. [YAML 配置参考](#10-yaml-配置参考)
 11. [输出目录结构](#11-输出目录结构)
 12. [常见问题排查](#12-常见问题排查)
+13. [能力状态与已知限制](#13-能力状态与已知限制)
 
 ---
 
@@ -21,21 +22,35 @@
 
 MPM_codex 是一个面向**找矿预测（Mineral Prospectivity Mapping）**的工程化实验框架，核心设计理念：
 
-- **可注册**：模型、特征算子、调优器、指标、谓词等全部通过统一注册表管理，新增组件无需修改框架核心代码
-- **可配置**：所有实验参数通过 YAML 配置文件驱动，配合 `--set` CLI 参数覆盖，无需硬编码
-- **可验证**：内置完整的实验管线（数据→特征→训练→评估→预测→导出），自动生成可复现性清单（manifest.json）
+- **可注册**：模型、特征算子、调优器、指标、谓词、知识提供者，以及研究单元、采样、标签、权重等研究变量全部通过统一注册表管理，新增组件无需修改框架核心代码。
+- **可配置**：所有实验参数通过 YAML 配置文件驱动，配合 `--set` CLI 参数覆盖（仅标量），无需硬编码。
+- **可验证**：内置完整的实验管线（数据→特征→训练→评估→预测→导出），自动生成可复现性清单（manifest.json）。
+
+### 能力状态速览
+
+| 能力 | 状态 |
+|------|------|
+| 二维靶区预测 `target_area_prediction` | `implemented` |
+| 三种执行模式（replay / archive-features / raw_gis） | `implemented`，且配置校验会**拒绝不生效的字段** |
+| RF 基线 | `implemented` |
+| SPE / CNN / MLP | `implemented`，但算法一致性尚未验证 → 科研上标 `experimental` |
+| MLP + LUSI 谓词约束损失 | `implemented`，数值对齐尚未验证 → `experimental` |
+| 概率校准（`calibrated_probability`） | **未实现**（`probability` 为未校准正类概率） |
+| 深边部预测 `deep_edge_prediction` | `placeholder`（无三维能力，实例化即报错） |
+
+> 本框架当前可用于**归档回放、固定归档特征上的模型/调参/指标对比，以及合成数据上的 raw_gis 端到端开发与测试**；在完成空间验证、PU 语义、概率校准和原始 GIS 端到端复现之前，不宜直接用于可发表的二维研究结论。详见 [§13 能力状态与已知限制](#13-能力状态与已知限制)。
 
 ### 数据流总览
 
 ```
 YAML 配置 → load_config() → DEFAULTS 合并 → Phase1 迁移 → 路径解析
-    → validate_config() → ExperimentConfig → Experiment.run()
-        ├── ① prepare_data     （加载归档数据或构建研究单元）
-        ├── ② build_features   （快照特征或运行 GIS 算子）
-        ├── ③ prepare_dataset  （校验 schema 或预处理）
-        ├── ④ train            （回放归档模型 或 调优器训练）
+    → validate_config()（严格 schema + 模式能力边界） → ExperimentConfig → Experiment.run()
+        ├── ① prepare_data     （加载归档数据 或 构建研究单元）
+        ├── ② build_features   （快照归档特征 或 运行 GIS 算子管线）
+        ├── ③ prepare_dataset  （校验归档 schema 或 准备预处理）
+        ├── ④ train            （回放归档模型 或 调优器训练；raw_gis 先外层划分再折内拟合）
         ├── ⑤ evaluate         （计算指标）
-        ├── ⑥ predict          （生成预测概率，导出 CSV/GeoTIFF）
+        ├── ⑥ predict          （生成预测分数，导出 CSV/GeoTIFF）
         └── export             （写入 manifest.json 可复现性清单）
 ```
 
@@ -53,21 +68,50 @@ python scripts/list_components.py
 # 验证配置是否正确（不访问数据文件，快速检查）
 python run.py --config configs/experiments/lachlan_rf_phase2.yaml --validate-only
 
-# 运行 RF 基线回放实验（archive_replay 模式，直接复制归档结果）
+# 归档回放（archive_replay：复制归档模型与预测，不训练）
 python run.py --config configs/experiments/lachlan_rf_baseline.yaml
 
-# 运行 RF 正式训练实验（train_from_archive_features 模式）
+# 从归档特征重新训练 RF（无调参，最快）
+python run.py --config configs/experiments/lachlan_rf_train.yaml
+
+# 从归档特征重新训练 RF（贝叶斯调参）
 python run.py --config configs/experiments/lachlan_rf_phase2.yaml
 
-# 运行 SPE 模型训练（带调优）
+# 从归档特征重新训练 SPE（无调参 / 带调优）
+python run.py --config configs/experiments/lachlan_spe_notune.yaml
 python run.py --config configs/experiments/lachlan_spe.yaml
 
-# 运行 CNN 模型训练
+# 从归档特征重新训练 CNN（带调优） / MLP（无调参）
 python run.py --config configs/experiments/lachlan_cnn.yaml
+python run.py --config configs/experiments/lachlan_mlp.yaml
+
+# 原始 GIS 端到端（冒烟版：完整栅格 / fixture 版：极小栅格子集，更快）
+python run.py --config configs/experiments/lachlan_rf_raw_gis_smoke.yaml
+python run.py --config configs/experiments/lachlan_rf_raw_gis_fixture.yaml
 
 # 运行测试
-python -m pytest tests/ -q
+python -m pytest -q
 ```
+
+> 各配置文件的执行模式、模型、调优方式见 [§2.1](#21-内置实验配置一览)。
+
+### 2.1 内置实验配置一览
+
+| 配置文件 | 执行模式 | 模型 | 调优 | 说明 |
+|---------|:--:|:--:|:--:|------|
+| `lachlan_rf_baseline.yaml` | `archive_replay` | rf | — | Lachlan 归档回放 |
+| `nsw_rf_baseline.yaml` | `archive_replay` | rf | — | NSW 归档回放 |
+| `lachlan_rf_train.yaml` | `train_from_archive_features` | rf | none | 无调参重训 |
+| `lachlan_rf_simple_train.yaml` | `train_from_archive_features` | rf | none | 无调参重训（权重 VLG=0.8） |
+| `lachlan_rf_phase2.yaml` | `train_from_archive_features` | rf | bayes（n_iter=1000） | 完整 RF 调参 + GeoTIFF 导出 |
+| `lachlan_rf_pub_train.yaml` | `train_from_archive_features` | rf | bayes（n_iter=50） | 调参重训（`label_refinement` 已禁用） |
+| `lachlan_spe.yaml` | `train_from_archive_features` | spe | bayes（n_iter=100） | SPE 调参 |
+| `lachlan_spe_notune.yaml` | `train_from_archive_features` | spe | none | SPE 固定参数 |
+| `lachlan_cnn.yaml` | `train_from_archive_features` | cnn | bayes（n_iter=50） | CNN 调参 |
+| `lachlan_mlp.yaml` | `train_from_archive_features` | mlp | none（默认） | MLP 基线（LUSI 需 `tuning=none`） |
+| `lachlan_rf_raw_gis.yaml` | `raw_gis` | rf | none | 完整 GIS 数据，预测网格 0.05 |
+| `lachlan_rf_raw_gis_smoke.yaml` | `raw_gis` | rf | none | 完整 GIS 数据，预测网格 0.2（更快） |
+| `lachlan_rf_raw_gis_fixture.yaml` | `raw_gis` | rf | none | 栅格指向 `tests/fixtures/gis/rasters`（CI 可用） |
 
 ---
 
@@ -79,98 +123,114 @@ MPM_codex_phase2/
 ├── baseline_tools.py                         # 基线工件安全检查工具（无科学计算依赖）
 │
 ├── configs/                                  # 配置文件目录
-│   └── experiments/                          #   实验 YAML 配置
-│       ├── lachlan_rf_baseline.yaml          #     RF 基线回放（Lachlan，Phase1 格式）
-│       ├── lachlan_rf_phase2.yaml            #     RF 从归档特征重新训练（Lachlan，Phase2 格式）
-│       ├── lachlan_cnn.yaml                  #     CNN 模型训练 + 调优
-│       ├── lachlan_spe.yaml                  #     SPE 模型训练 + 调优
-│       ├── lachlan_spe_notune.yaml           #     SPE 模型训练（无调优，固定参数）
-│       └── nsw_rf_baseline.yaml              #     RF 基线回放（NSW 地区，Phase1 格式）
+│   └── experiments/                          #   实验 YAML 配置（见 §2.1 一览）
 │
 ├── src/                                      # 框架源码
 │   ├── core/                                 # ★ 框架核心（骨架层，扩展时不需要改）
-│   │   ├── config.py                         #   配置加载/合并/校验/Phase1迁移/CLI覆盖
-│   │   ├── experiment.py                     #   实验编排器（6阶段管线）
+│   │   ├── config.py                         #   配置加载/合并/校验/Phase1迁移/CLI覆盖/模式能力边界
+│   │   ├── experiment.py                     #   实验编排器（6阶段管线 + manifest 导出）
 │   │   ├── registry.py                       #   ★ 通用组件注册表 ComponentRegistry
 │   │   ├── bootstrap.py                      #   启动时自动导入所有内置组件触发注册
 │   │   ├── contracts.py                      #   数据契约（TrainingData/SplitData）与接口协议
 │   │   └── spec.py                           #   配置的类型化视图 ExperimentSpec
 │   │
 │   ├── models/                               # ★ 模型适配器（新增模型在此写）
-│   │   ├── registry.py                       #   MODEL_REGISTRY + LABEL_REFINER_REGISTRY
+│   │   ├── registry.py                       #   MODEL_REGISTRY + LABEL_REFINER_REGISTRY + fit_params_for
 │   │   ├── rf.py                             #   随机森林适配器
-│   │   ├── spe.py                            #   Self-Paced Ensemble 适配器
+│   │   ├── spe.py                            #   Self-Paced Ensemble 适配器（自包含实现）
 │   │   ├── cnn.py                            #   1D CNN（PyTorch）适配器
-│   │   └── pu.py                             #   PUB 标签细化器
+│   │   ├── mlp.py                            #   MLP（PyTorch）+ LUSI 谓词约束加权损失
+│   │   └── pu.py                             #   PUB 标签细化器（legacy 兼容）
 │   │
-│   ├── data/                                 # 数据加载与研究单元构建
+│   ├── training/                             # 共享 PyTorch 训练与损失（CNN/MLP 复用）
+│   │   ├── losses.py                         #   LUSI 谓词约束加权损失（weighted_mse_with_predicate）
+│   │   └── trainer.py                        #   TorchTrainingLoop / TorchTrainingConfig
+│   │
+│   ├── data/                                 # 数据加载与研究变量（注册化）
 │   │   ├── dataset.py                        #   归档数据集加载/校验/快照
-│   │   ├── research_units.py                 #   构建正样本/无标签/预测网格单元
-│   │   └── labels.py                         #   SIZE_CODE → 标签 + 样本权重映射
+│   │   ├── registries.py                     #   研究单元/采样器/标签/权重注册表（4 个）
+│   │   ├── research_unit_builtins.py         #   研究单元构建器（point_local_environment）
+│   │   ├── samplers.py                       #   背景采样器（random_points_in_nsw_boundary）
+│   │   ├── label_strategies.py               #   标签策略（positive_unlabeled_as_zero）
+│   │   ├── weight_strategies.py              #   样本权重策略（size_code、uniform）
+│   │   ├── research_units.py                 #   （遗留）点研究单元函数集合，注册化后仅兼容
+│   │   └── labels.py                         #   （遗留）标签/权重函数集合
 │   │
 │   ├── features/                             # 特征预处理
-│   │   └── preprocess.py                     #   基线预处理管线（相关性滤波→OneHot→标准化）
+│   │   ├── preprocess.py                     #   ★ BaselinePreprocessor（fit/transform/fit_transform，split-first）
+│   │   └── spatial.py                        #   SpatialFeatureExtractor（旧 API 兼容层）
 │   │
 │   ├── operators/features/                   # 特征算子（GIS 特征提取）
-│   │   ├── pipeline.py                       #   算子管线编排器
-│   │   ├── builtins.py                       #   5个内置算子实现
-│   │   ├── context.py                        #   GIS 算子访问与栅格文件扫描
-│   │   └── registry.py                       #   算子注册表
+│   │   ├── pipeline.py                       #   算子管线编排器（行数/schema 契约）
+│   │   ├── builtins.py                       #   5 个内置算子实现（封装 lib_mpm）
+│   │   ├── context.py                        #   LegacyFeatureContext（延迟加载 lib_mpm）
+│   │   └── registry.py                       #   FEATURE_OPERATOR_REGISTRY
 │   │
 │   ├── tasks/                                # 找矿任务定义
 │   │   ├── registry.py                       #   TASK_REGISTRY
 │   │   ├── target_area.py                    #   靶区预测任务（已完整实现）
-│   │   └── deep_edge.py                      #   深边部预测任务（占位）
+│   │   └── deep_edge.py                      #   深边部预测任务（占位，实例化即报错）
 │   │
 │   ├── tuning/                               # 超参数调优
 │   │   ├── registry.py                       #   TUNER_REGISTRY
-│   │   ├── bayes.py                          #   贝叶斯优化（基于 scikit-optimize）
+│   │   ├── bayes.py                          #   贝叶斯优化（scikit-optimize）
 │   │   └── none.py                           #   无调优，直接训练
 │   │
 │   ├── validation/                           # 验证与评估
 │   │   ├── registry.py                       #   SPLITTER_REGISTRY + METRIC_REGISTRY
-│   │   ├── splitters.py                      #   留出法 + 分层 K 折交叉验证
-│   │   └── metrics.py                        #   6个评估指标
+│   │   ├── splitters.py                      #   留出法 + 分层/空间 K 折交叉验证
+│   │   ├── metrics.py                        #   9 个通用分类指标
+│   │   └── mpm_metrics.py                    #   MPM 面积捕获指标（prediction-rate curve 等）
 │   │
 │   ├── knowledge/                            # 知识注入
-│   │   ├── pipeline.py                       #   知识管线
-│   │   ├── providers.py                      #   知识提供者（仅 empty 占位实现）
+│   │   ├── pipeline.py                       #   知识管线（命名空间 knowledge[provider]）
+│   │   ├── providers.py                      #   知识提供者（empty、spatial_extent）
 │   │   └── registry.py                       #   KNOWLEDGE_REGISTRY
 │   │
 │   ├── predicates/                           # 谓词约束
-│   │   ├── pipeline.py                       #   谓词管线（顺序执行）
+│   │   ├── pipeline.py                       #   谓词管线（data_transform 先于 constraint）
 │   │   ├── builtins.py                       #   谓词实现（all_ones, spatial_box, spatial_distance, combined）
 │   │   └── registry.py                       #   PREDICATE_REGISTRY
 │   │
 │   └── utils/                                # 工具函数
-│       ├── logging.py                        #   日志配置
-│       └── files.py                          #   SHA256/Git信息/YAML-JSON读写
+│       ├── logging.py                        #   日志配置（handler 清理，防跨目录累积）
+│       ├── files.py                          #   SHA256/Git信息/环境版本/YAML-JSON读写
+│       └── seeds.py                          #   SeedContext（派生 sampling/split/tuning/model/dataloader 种子）
 │
 ├── outputs/                                  # 实验输出目录（.gitignore）
-│   └── <实验名称>_<时间戳>/
+│   └── <实验名称>_<run_id>/                   #   每次运行自动追加微秒级时间戳
 │       ├── config_resolved.yaml              #   合并后的完整配置（含DEFAULTS+CLI覆盖）
 │       ├── experiment.log                    #   结构化日志
-│       ├── manifest.json                     #   可复现性清单（含Git commit/文件哈希）
+│       ├── manifest.json                     #   可复现性清单（含Git commit/派生种子/split摘要/哈希）
 │       ├── metrics.json                      #   评估指标
 │       ├── models/                           #   序列化模型（.pkl）
-│       ├── predictions/                      #   预测结果（CSV + GeoTIFF）
+│       ├── predictions/                      #   预测结果（CSV + 可选 GeoTIFF）
 │       ├── figures/                          #   评估图表
 │       └── intermediate/                     #   中间数据快照
 │
 ├── scripts/                                  # 辅助脚本
-│   ├── list_components.py                    #   列出所有已注册组件
+│   ├── list_components.py                    #   列出主注册表组件（不含研究变量注册表）
 │   ├── create_baseline_manifest.py           #   创建基线工件清单
 │   ├── render_run_sh.py                      #   从配置生成 shell 命令
-│   └── validate_reproduction.py              #   可复现性验证
+│   ├── validate_reproduction.py              #   复现验证（防零执行假阳性）
+│   └── baseline/                             #   基线 shell（lachlan_rf.sh / nsw_rf.sh）
 │
 ├── tests/                                    # 测试
 │   ├── test_framework.py                     #   框架核心测试
 │   ├── test_spe_model.py                     #   SPE 模型单元测试
+│   ├── test_mlp_predicates.py                #   MLP + 谓词/LUSI 测试
+│   ├── test_mpm_metrics.py                   #   MPM 面积指标测试
+│   ├── test_seeds.py                         #   SeedContext 派生测试
+│   ├── fixtures/gis/rasters/                 #   最小 GIS fixture（raw_gis 冒烟用）
 │   └── baseline/                             #   基线回归测试
 │
 └── docs/                                     # 文档
     ├── PHASE2_ARCHITECTURE_CN.md             #   架构说明
-    └── PHASE2_USAGE_CN.md                    #   使用说明
+    ├── PHASE2_USAGE_CN.md                    #   使用说明（简洁版）
+    ├── PHASE2_USAGE_VERIFIED.md              #   历史验证版使用说明
+    ├── PHASE1_MIGRATION.md                   #   Phase1 迁移说明
+    ├── BASELINE.md                           #   重构前基线契约
+    └── baseline_manifest.json                #   基线工件清单
 ```
 
 ### 分层架构
@@ -179,19 +239,14 @@ MPM_codex_phase2/
 ┌──────────────────────────────────────────────────────────┐
 │  run.py                     ← 入口层（argparse + 调用）  │
 ├──────────────────────────────────────────────────────────┤
-│  src/core/config.py         ← 配置层（加载/合并/校验）   │
+│  src/core/config.py         ← 配置层（加载/合并/严格校验）│
 │  src/core/experiment.py     ← 编排层（6阶段管线）        │
 │  src/core/spec.py           ← 类型化视图                 │
 ├──────────────────────────────────────────────────────────┤
-│  src/models/                ← 组件层（全部可插拔替换）    │
-│  src/tuning/                                           │
-│  src/validation/                                       │
-│  src/tasks/                                            │
-│  src/operators/features/                               │
-│  src/predicates/                                       │
-│  src/knowledge/                                        │
-│  src/data/                                             │
-│  src/features/                                         │
+│  src/models/  src/tuning/  src/validation/  src/tasks/  │
+│  src/operators/features/  src/predicates/  src/knowledge/│
+│  src/data/（研究单元/采样/标签/权重）  src/features/     │
+│                                ← 组件层（全部可插拔替换） │
 ├──────────────────────────────────────────────────────────┤
 │  src/core/registry.py       ← 基础设施层（注册表）       │
 │  src/core/contracts.py      ← 数据契约                  │
@@ -210,7 +265,7 @@ MPM_codex_phase2/
 所有实验都通过 `run.py` 执行，通过 `--config` 参数指定配置文件：
 
 ```bash
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml
+python run.py --config configs/experiments/lachlan_rf_train.yaml
 ```
 
 ### 4.2 实验管线（6 个阶段）
@@ -221,18 +276,32 @@ python run.py --config configs/experiments/lachlan_rf_phase2.yaml
 |:----:|------|------|---------|
 | ① | `prepare_data` | 加载数据 | `archive_replay`/`train_from_archive_features` 模式加载归档CSV；`raw_gis` 模式构建研究单元 |
 | ② | `build_features` | 构建特征 | 快照归档特征，或运行配置的 GIS 特征算子管线 |
-| ③ | `prepare_dataset` | 准备数据集 | 校验 schema，或执行相关性滤波→OneHot编码→标准化 |
-| ④ | `train` | 训练模型 | 回放归档模型，或通过 Tuner 训练（可含超参数搜索） |
-| ⑤ | `evaluate` | 评估指标 | 计算 accuracy/precision/recall/f1/roc_auc/confusion_matrix |
-| ⑥ | `predict` | 预测导出 | 生成预测概率，导出 CSV + GeoTIFF |
+| ③ | `prepare_dataset` | 准备数据集 | 校验归档 schema，或准备 raw_gis 预处理（**不在此处拟合**） |
+| ④ | `train` | 训练模型 | 回放归档模型，或（raw_gis 先外层划分、仅训练折拟合预处理）通过 Tuner 训练 |
+| ⑤ | `evaluate` | 评估指标 | 计算配置的指标；回放模式仅记录元数据不重算 |
+| ⑥ | `predict` | 预测导出 | 生成预测分数，导出 CSV + 可选 GeoTIFF |
 
-### 4.3 三种执行模式
+### 4.3 三种执行模式与能力边界
 
 | 模式 | 适用场景 | 数据来源 | 模型来源 | 需要 GIS 依赖 |
 |------|---------|---------|---------|:--:|
 | `archive_replay` | 回归验证，确认框架能复现历史结果 | 归档 CSV | 归档 .pkl 文件直接复制 | 否 |
-| `train_from_archive_features` | 快速模型迭代，换模型/换参数 | 归档 CSV（预计算特征） | 重新训练 | 否 |
+| `train_from_archive_features` | 快速模型迭代，换模型/换参数/换指标 | 归档 CSV（预计算特征） | 重新训练 | 否 |
 | `raw_gis` | 完整管线，从原始 GIS 数据开始 | 原始 GIS 文件（.shp/.tif） | 重新训练 | 是 |
+
+**每种模式都拒绝不生效的配置（配置必须产生行为）。** 在 `validate_config` 阶段即硬失败，而不是静默忽略：
+
+| 配置能力 | `archive_replay` | `train_from_archive_features` | `raw_gis` |
+|---|:---:|:---:|:---:|
+| 复制并核验归档工件 | 是 | 否 | 否 |
+| 训练新模型 | 否 | 是 | 是 |
+| 更换模型/调参 | **拒绝**（须 `tuning=none`） | 是 | 是 |
+| 修改外层 train/test（holdout） | 拒绝 | **拒绝**（须 `random_holdout`，实际用归档固定划分） | 是 |
+| 特征算子 | **拒绝**（须 `features.operators=[]`） | **拒绝**（须 `[]`，归档特征已固定） | 是 |
+| 预处理 | 拒绝 | 已在归档中固定 | 是（fold-safe） |
+| PUB/标签细化 | **拒绝** | **拒绝**（归档标签已固定） | 是（仅训练折内） |
+| Knowledge/Predicate | **拒绝** | 仅能从归档字段计算者可用（空间谓词缺坐标会报错） | 是 |
+| 区域预测 | 复制归档结果 | 使用归档目标特征 | 从 GIS 构建目标特征 |
 
 ### 4.4 组件注册表机制
 
@@ -262,15 +331,21 @@ value = metric_fn(labels, predictions, probabilities, sample_weight)
 
 | 注册表变量 | 领域 | 已注册项 | 对应 YAML 路径 |
 |-----------|------|---------|---------------|
-| `MODEL_REGISTRY` | 模型 | `rf`, `spe`, `cnn` | `model.name` |
+| `MODEL_REGISTRY` | 模型 | `rf`, `spe`, `cnn`, `mlp` | `model.name` |
 | `FEATURE_OPERATOR_REGISTRY` | 特征算子 | `raster_statistics`, `texture`, `elevation_gradient`, `line_distance`, `categorical_geology` | `features.operators[].name` |
 | `TASK_REGISTRY` | 找矿任务 | `target_area_prediction`, `deep_edge_prediction`（占位） | `task.name` |
 | `TUNER_REGISTRY` | 调优器 | `none`, `bayes` | `tuning.name` |
 | `LABEL_REFINER_REGISTRY` | 标签细化 | `pub` | `label_refinement.name` |
 | `SPLITTER_REGISTRY` | 数据分拆 | `random_holdout`, `stratified_kfold`, `spatial_block_kfold`, `spatial_group_kfold`, `spatial_block_holdout` | `validation.holdout.name`, `validation.cross_validation.name` |
-| `METRIC_REGISTRY` | 评估指标 | `accuracy`, `precision`, `recall`, `f1`, `roc_auc`, `confusion_matrix` | `validation.metrics[]`, `validation.primary_metric` |
+| `METRIC_REGISTRY` | 评估指标 | `accuracy`, `precision`, `recall`, `f1`, `roc_auc`, `confusion_matrix`, `average_precision`, `balanced_accuracy`, `mcc` | `validation.metrics[]`, `validation.primary_metric` |
 | `PREDICATE_REGISTRY` | 谓词约束 | `all_ones`, `spatial_box`, `spatial_distance`, `combined` | `predicates.items[].name` |
-| `KNOWLEDGE_REGISTRY` | 知识注入 | `empty` | `knowledge.items[].name` |
+| `KNOWLEDGE_REGISTRY` | 知识注入 | `empty`, `spatial_extent` | `knowledge.items[].name` |
+| `RESEARCH_UNIT_REGISTRY` | 研究单元 | `point_local_environment` | `research_unit.type` |
+| `BACKGROUND_SAMPLER_REGISTRY` | 背景采样 | `random_points_in_nsw_boundary` | `research_unit.train_unlabeled` |
+| `LABEL_STRATEGY_REGISTRY` | 标签策略 | `positive_unlabeled_as_zero` | `label.strategy` |
+| `WEIGHT_STRATEGY_REGISTRY` | 样本权重 | `size_code`, `uniform` | `label.sample_weight`（由标签策略消费） |
+
+> 注意：`scripts/list_components.py` 目前只打印前 9 个主注册表；研究单元/背景采样/标签策略/样本权重这 4 个研究变量注册表已注册化（见 `src/data/registries.py`），但未列入该脚本输出。
 
 ### 4.5 配置加载流程
 
@@ -283,9 +358,11 @@ YAML 文件
     ↓ _deep_merge(DEFAULTS, migrated)  ← 合并默认值，用户配置覆盖默认值
 完整字典
     ↓ _resolve_dataset_paths()     ← 相对路径 → 绝对路径
-    ↓ validate_config()            ← 校验所有组件名在注册表中存在
+    ↓ validate_config()            ← 严格 schema + 组件名校验 + 模式能力边界
     ↓ ExperimentConfig(values=resolved, source_path=...)
 ```
+
+严格 schema：顶层、`model`、`research_unit`、`label` 节拒绝未知键；组件名必须存在于对应注册表；`train_positive` 仅支持 `occurrence_points`；`categorical_encoding`/`scaling` 目前仅实现单一取值。
 
 **`--set` CLI 覆盖的插入位置：**
 
@@ -297,9 +374,38 @@ apply_cli_overrides(config, ["model.name=spe", "tuning.params.n_iter=200"])
     ↓ ② _coerce_value: "200" → 200 (int)
     ↓ ③ _dot_to_nested: {"model.name": "spe"} → {"model": {"name": "spe"}}
     ↓ ④ _deep_merge(config.values, overrides_nested)
-    ↓ ⑤ validate_config(merged)  ← 重新校验
+    ↓ ⑤ validate_config(merged)  ← 重新校验（含模式能力边界）
     ↓ ⑥ 返回新的 ExperimentConfig
 ```
+
+### 4.6 评分语义契约（score_type）
+
+预测输出的列名与语义由 `prediction.score_type` 与 `prediction.normalization` 共同决定：
+
+| score_type | 语义 | 来源 | 输出列名 | 允许的 normalization |
+|-----------|------|------|---------|---------------------|
+| `probability` | 未校准正类概率 | `predict_proba` | `prob` | 仅 `none` |
+| `raw_score` | 模型原始决策分数 | `decision_function`（需模型支持） | `raw_score` | 仅 `none` |
+| `relative_score` | 相对分数（可 MinMax） | `predict_proba`（+可选 MinMax） | `relative_score` | `none` 或 `minmax` |
+
+- `probability` / `raw_score` 与 `normalization=minmax` 互斥（MinMax 结果不是校准概率），配置校验会拒绝。
+- `raw_score` 需要模型暴露 `decision_function`（如 SVM/逻辑回归）；RF/SPE/CNN/MLP 只暴露 `predict_proba`，应使用 `probability` 或 `relative_score`。
+- 当前 **没有实现 `calibrated_probability`**：`probability` 是未校准的正类概率，不能直接当作成矿概率阈值使用。
+
+### 4.7 随机种子派生（SeedContext）
+
+框架从实验基础种子 `experiment.seed` 派生出互不干扰的用途种子（`src/utils/seeds.py`），保证改某个阶段的随机性不影响其他阶段：
+
+```text
+experiment.seed
+    ├── sampling_seed    # 未标注点采样
+    ├── split_seed       # 外层划分
+    ├── tuning_seed      # 调优（BayesSearchCV）
+    ├── model_seed       # 模型 random_state（RF/SPE/CNN/MLP 均直接覆盖）
+    └── dataloader_seed  # PyTorch DataLoader
+```
+
+因此 `--set experiment.seed=N` 现在会真正改变模型的随机性（RF 的 `build()` 用 `resolved["random_state"] = seed` 直接覆盖，而非 `setdefault`）。派生种子表会写入 manifest 的 `derived_seeds`。
 
 ---
 
@@ -309,7 +415,7 @@ apply_cli_overrides(config, ["model.name=spe", "tuning.params.n_iter=200"])
 
 ```bash
 # 完整运行一个实验
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml
+python run.py --config configs/experiments/lachlan_rf_train.yaml
 
 # 运行 SPE 实验（无调优，固定参数）
 python run.py --config configs/experiments/lachlan_spe_notune.yaml
@@ -326,40 +432,48 @@ python run.py --config configs/experiments/lachlan_rf_phase2.yaml --validate-onl
 #   "experiment": "lachlan_rf_phase2_test",
 #   "execution_mode": "train_from_archive_features",
 #   "task": "target_area_prediction",
-#   "feature_operators": ["raster_statistics", "texture", ...],
+#   "feature_operators": [],
 #   "model": "rf",
-#   "tuner": "bayes",
-#   ...
+#   "label_refinement": null,
+#   "knowledge": [],
+#   "predicates": [],
+#   "holdout": "random_holdout",
+#   "cross_validation": "stratified_kfold",
+#   "metrics": ["accuracy", "precision", "recall", "f1", "confusion_matrix", "roc_auc"],
+#   "primary_metric": "f1",
+#   "tuner": "bayes"
 # }
 ```
 
+`--validate-only` 只加载配置、校验 schema 与组件兼容性、打印组件图，**不实例化 `Experiment`、不访问数据**，也不证明实验可复现。
+
 ### 5.3 CLI 参数覆盖（`--set`）
 
-**不修改 YAML 文件，直接在命令行覆盖任意配置项**。这是进行快速实验对比的核心功能。
+**不修改 YAML 文件，直接在命令行覆盖任意标量配置项**。这是快速实验对比的核心功能。
 
 ```bash
 # 单参数覆盖：换模型
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml --set model.name=spe
+python run.py --config configs/experiments/lachlan_rf_train.yaml --set model.name=spe
 
-# 多参数覆盖：换模型 + 换调优器 + 调参数
+# 多参数覆盖：换调优器 + 调参数
 python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set model.name=spe tuning.name=none tuning.params.n_iter=200
+    --set tuning.name=none tuning.params.n_iter=200
 
 # 覆盖调优参数
 python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.params.n_iter=500 tuning.params.search_space.max_depth.low=3
+    --set tuning.params.n_iter=500
 
 # 覆盖实验级参数
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
+python run.py --config configs/experiments/lachlan_rf_train.yaml \
     --set experiment.seed=999 experiment.name=my_custom_exp
 
 # 覆盖验证参数
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
+python run.py --config configs/experiments/lachlan_rf_train.yaml \
     --set validation.holdout.params.test_size=0.3 validation.primary_metric=roc_auc
 
 # 开关型参数
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set label_refinement.enabled=false prediction.export_geotiff=false
+python run.py --config configs/experiments/lachlan_rf_train.yaml \
+    --set prediction.export_geotiff=false
 
 # 配合 validate-only 预览覆盖效果
 python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
@@ -373,23 +487,24 @@ python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
 - 其他 → 保持字符串
 
 **重要限制：**
-- `--set` **不支持列表值或 JSON 值**（如 `'features.operators=[{...}]'`），请使用专用 YAML 配置文件
-- `--set` **不支持列表索引路径**（如 `predicates.items.0.name=xxx`），请使用专用 YAML 配置文件
+- `--set` **不支持列表值或 JSON 值**（如 `'features.operators=[{...}]'`），请使用专用 YAML 配置文件。
+- `--set` **不支持列表索引路径**（如 `predicates.items.0.name=xxx`），请使用专用 YAML 配置文件。
+- 遇到列表/JSON/列表索引路径时，框架会直接报错并提示改用 YAML。
 
 **重要行为：**
-- 原 YAML 文件不会被修改，覆盖只在内存中生效
-- 覆盖后会重新走 `validate_config` 校验，无效覆盖在运行前被拦截
-- `config_resolved.yaml` 会记录最终合并后的参数（包含 CLI 覆盖）
+- 原 YAML 文件不会被修改，覆盖只在内存中生效。
+- 覆盖后会重新走 `validate_config` 校验（含模式能力边界），无效覆盖在运行前被拦截。
+- `config_resolved.yaml` 会记录最终合并后的参数（包含 CLI 覆盖）。
 
 ### 5.4 输出目录时间戳
 
-**每次运行实验会自动在输出目录名后追加时间戳**，防止重复运行同一配置时覆盖前次结果。
+**每次运行实验会自动在输出目录名后追加微秒级 `run_id`**，防止重复运行同一配置时覆盖前次结果。目录以原子方式创建，已存在则失败。
 
 ```
-# 配置中写的是: output_dir: outputs/lachlan_rf_phase2_test
-# 实际创建的目录: outputs/lachlan_rf_phase2_test_20260901_143052/
-#                                                      ↑
-#                                               YYYYMMDD_HHMMSS
+# 配置中写的是: output_dir: outputs/lachlan_rf_train
+# 实际创建的目录: outputs/lachlan_rf_train_20260901_143052_123456/
+#                                                        ↑
+#                                        YYYYMMDD_HHMMSS_微秒
 ```
 
 这意味着你可以连续多次运行同一个 YAML 配置（每次用不同 `--set` 参数），每次结果都会保存在独立的目录中。
@@ -400,17 +515,23 @@ python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
 python scripts/list_components.py
 ```
 
+如需同时加载 YAML `plugins` 列表中的模块：
+
+```bash
+python scripts/list_components.py --config configs/experiments/my_experiment.yaml
+```
+
 ### 5.6 运行测试
 
 ```bash
 # 运行全部测试
-python -m pytest tests/ -q
+python -m pytest -q
 
 # 运行特定测试
 python -m pytest tests/test_framework.py -q
 
 # 运行特定测试方法
-python -m pytest tests/test_framework.py::test_cli_overrides_merge_and_validate -v
+python -m pytest tests/test_framework.py::FrameworkTests::test_config_load -v
 ```
 
 ---
@@ -424,12 +545,14 @@ python -m pytest tests/test_framework.py::test_cli_overrides_merge_and_validate 
 | 文件 | 行数 | 用途 |
 |------|:----:|------|
 | `Xy_train.csv` | 479 | 全部训练数据（138 特征 + `sample_weight` + `label`） |
+| `Xy_train_new.csv` | 479 | 训练数据副本（PUB 兼容用，schema 与 Xy_train 一致） |
 | `Xy_rf_train.csv` | 359 | 训练集（75%），用于模型训练 |
 | `Xy_rf_test.csv` | 120 | 测试集（25%），用于模型评估 |
 | `target_features.csv` | 4071 | 预测网格点的特征（无标签） |
 | `target_coords_purged.csv` | 4071 | 预测网格点的 X/Y 坐标 |
 | `target_mask.csv` | 4200 | 完整研究区网格掩膜（含研究区内/外标记） |
-| `Xy_train_new.csv` | 479 | 训练数据副本（PUB 兼容用） |
+
+`DatasetRepository.REQUIRED_FILES` 强制要求上述 7 个文件齐全，且 schema 一致；缺失即报错。
 
 ### 6.2 训练数据列结构
 
@@ -442,6 +565,8 @@ sample_weight（样本权重：VLG 大矿 0.8，OCC 小矿 0.1，unlabeled 背�
     +
 label（标签：1=已知矿点，0=背景点）
 ```
+
+> 注意：未标注背景点被临时编码为 `0` 是当前训练策略，不代表它们是已验证的无矿负样本（见 [§13 能力状态与已知限制](#13-能力状态与已知限制)）。
 
 ### 6.3 预测文件关联方式
 
@@ -459,7 +584,7 @@ target_mask.csv（4200行，完整网格，含研究区内/外）
 重建 2D 网格时：
   ① 创建 4200 个空位，全填 NaN
   ② 找到所有标记为 1 的位置（研究区内，共 4071 个）
-  ③ 把预测概率按行号顺序填进去
+  ③ 把预测分数按行号顺序填进去
   ④ 按 X/Y 唯一值 reshape 成 2D 矩阵 → 画图/导出 GeoTIFF
 ```
 
@@ -472,9 +597,11 @@ target_mask.csv（4200行，完整网格，含研究区内/外）
 框架通过 **适配器（Adapter）** 和 **模型实例（Model）** 两层分离来统一操作所有模型：
 
 ```
-适配器（Adapter）— 2 个方法（工厂，负责"造模型"）
+适配器（Adapter）— 3 个职责（工厂，负责"造模型"）
     ├── build(params, seed)       → 返回一个模型实例
-    └── fit_params(data)          → 返回训练参数（如 sample_weight）
+    ├── fit_params(data)          → 返回训练参数（sample_weight、constraints）
+    └── validate_config(params)   → 校验模型参数合法性
+    （可选属性：supports_constraints、artifact_filename、archive_metric_aliases）
 
 模型实例（Model）— 3 个方法（由 build() 返回的对象，负责实际训练和预测）
     ├── fit(X, y, **kwargs)       → 训练
@@ -485,21 +612,43 @@ target_mask.csv（4200行，完整网格，含研究区内/外）
 **适配器是"工厂"，模型是"产品"。** 框架内部调用流程：
 
 ```python
-model = model_adapter.build(params, seed)          # ① 适配器造模型
-model.fit(X, y, **model_adapter.fit_params(data))  # ② 模型训练
-model.predict(X)                                   # ③ 预测类别
-model.predict_proba(X)                             # ④ 预测概率
+model = model_adapter.build(params, seed)           # ① 适配器造模型
+model.fit(X, y, **model_adapter.fit_params(data))   # ② 模型训练
+model.predict(X)                                    # ③ 预测类别
+model.predict_proba(X)                              # ④ 预测概率
 ```
 
-### 7.2 三种适配策略
+### 7.2 四种内置模型
+
+| 模型 | 实现 | `supports_constraints` | 依赖 | 说明 |
+|------|------|:--:|------|------|
+| `rf` | sklearn `RandomForestClassifier` | 否 | 核心 | 主要基线；`random_state=seed` 直接覆盖 |
+| `spe` | 自包含 `SelfPacedEnsemble`（ICDE 2020） | 否 | 核心 | 面向高度不平衡；基分类器默认决策树 |
+| `cnn` | PyTorch 1D CNN | 否 | `torch` | 将 138 维特征视为 1D 信号；`experimental` |
+| `mlp` | PyTorch MLP | **是** | `torch` | 唯一支持谓词约束/LUSI 加权损失；`experimental` |
+
+### 7.3 LUSI 谓词约束加权损失（MLP）
+
+`mlp` 适配器支持在损失中引入谓词统计不变量（Vapnik & Izmailov 的 LUSI，实现参考 TSIL）：
+
+```
+loss = τ̂ · MSE + τ · (1/N) · ‖φ̃ᵀ e‖²
+```
+
+- 当存在谓词约束时使用 LUSI 加权 MSE（在 sigmoid 概率上计算）；无约束时使用标准 `BCEWithLogitsLoss`。
+- φ 向量由 `constraint` 谓词生成（`all_ones`/`spatial_box`/`spatial_distance`/`combined`），经 L2 归一化。
+- τ 通过可学习参数 α 经 sigmoid 得到（`tau_init`/`learn_tau` 可配）。
+- **限制**：LUSI 数值对齐尚未验证（`experimental`）；贝叶斯搜索 + 谓词约束当前显式报错（`BayesSearchCV` 无法按折切分 φ），须用 `tuning.name=none`。
+
+### 7.4 三种适配策略
 
 | 模型情况 | 策略 | 代码量 | 例子 |
 |---------|------|:------:|------|
 | 本身就是 sklearn 模型 | 适配器直接返回，`build()` 只做参数传递 | ~30行 | RF 适配器 |
 | 自实现算法，无 sklearn 接口 | 写包装类继承 `BaseEstimator` + `ClassifierMixin`，手动实现 `fit/predict/predict_proba` | ~100行 | SPE 适配器 |
-| 底层库完全不同（如 PyTorch） | 写包装类，`fit()` 里写训练循环，`predict_proba()` 里写前向推理 | ~200行 | CNN 适配器 |
+| 底层库完全不同（如 PyTorch） | 写包装类，`fit()` 里写训练循环，`predict_proba()` 里写前向推理 | ~200行 | CNN / MLP 适配器 |
 
-### 7.3 四种特殊场景适配
+### 7.5 四种特殊场景适配
 
 | 变更程度 | 场景 | 需要改什么 | 不需要改 |
 |---------|------|-----------|---------|
@@ -514,7 +663,7 @@ model.predict_proba(X)                             # ④ 预测概率
 
 ### 8.1 新增模型
 
-完整步骤参见下方。以 XGBoost 为例（**教程示例**：`xgb` 组件与 `lachlan_xgb.yaml` 需你自行创建，当前仓库未预置）：
+以 XGBoost 为例（**教程示例**：`xgb` 组件与 `lachlan_xgb.yaml` 需你自行创建，当前仓库未预置）：
 
 **第一步：编写适配器** — `src/models/xgb.py`
 
@@ -569,6 +718,8 @@ def load_builtin_components() -> None:
     from ..models import xgb as _xgb    # ← 新增
 ```
 
+（或用 `plugins` 机制从外部模块加载，见 [§8.10](#810-通过-plugins-扩展组件)。）
+
 **第三步：编写 YAML 配置** — `configs/experiments/lachlan_xgb.yaml`
 
 ```yaml
@@ -577,7 +728,6 @@ experiment:
   seed: 2026
   output_dir: outputs/lachlan_xgb
   execution_mode: train_from_archive_features
-  variant: baseline
 
 model:
   name: xgb                        # ← 对应 @MODEL_REGISTRY.decorator("xgb")
@@ -592,21 +742,20 @@ tuning:
   params:
     n_iter: 100
     search_space:
-      n_estimators:     { type: integer, low: 50, high: 500 }
-      max_depth:        { type: integer, low: 3, high: 15 }
-      learning_rate:    { type: real, low: 0.01, high: 0.3, prior: log-uniform }
+      n_estimators:  { type: integer, low: 50, high: 500 }
+      max_depth:     { type: integer, low: 3, high: 15 }
+      learning_rate: { type: real, low: 0.01, high: 0.3, prior: log-uniform }
 # ... 其余配置节（dataset/research_unit/label/features/validation 等）复用已有配置
 ```
 
 **第四步：运行**
 
 ```bash
-# 验证配置
 python run.py --config configs/experiments/lachlan_xgb.yaml --validate-only
-
-# 运行实验
 python run.py --config configs/experiments/lachlan_xgb.yaml
 ```
+
+**支持约束的模型**：如需消费谓词约束，设置 `supports_constraints = True`，并在 `fit_params(data)` 中返回约束参数（参考 `src/models/mlp.py`）。声明支持约束却未实现 `fit_params(data)` 会显式失败。
 
 ### 8.2 新增验证指标
 
@@ -615,7 +764,7 @@ python run.py --config configs/experiments/lachlan_xgb.yaml
 ```python
 from sklearn.metrics import matthews_corrcoef
 
-@_register("mcc")
+@METRIC_REGISTRY.decorator("mcc")
 def metric_mcc(labels, predictions, probabilities, sample_weight):
     return float(matthews_corrcoef(labels, predictions, sample_weight=sample_weight))
 ```
@@ -630,37 +779,13 @@ validation:
     - recall
     - f1
     - roc_auc
-    - confusion_matrix
     - mcc                    # ← 新增
   primary_metric: f1
 ```
 
-**不需要改任何其他文件。** 指标函数签名固定为 `(labels, predictions, probabilities, sample_weight)`，框架自动调用。
+**不需要改任何其他文件。** 指标函数签名固定为 `(labels, predictions, probabilities, sample_weight)`，框架自动调用。主指标必须返回标量（用于调优评分）；结构化指标（如 `confusion_matrix`）可用于报告但不能作为 `primary_metric`。
 
-**其他常用指标示例：**
-
-```python
-# Balanced Accuracy（平衡准确率，适合不平衡数据）
-from sklearn.metrics import balanced_accuracy_score
-
-@_register("balanced_accuracy")
-def metric_balanced_accuracy(labels, predictions, probabilities, sample_weight):
-    return float(balanced_accuracy_score(labels, predictions, sample_weight=sample_weight))
-
-# Average Precision（平均精度，适合不平衡数据）
-from sklearn.metrics import average_precision_score
-
-@_register("average_precision")
-def metric_average_precision(labels, predictions, probabilities, sample_weight):
-    return float(average_precision_score(labels, probabilities, sample_weight=sample_weight))
-
-# Cohen's Kappa
-from sklearn.metrics import cohen_kappa_score
-
-@_register("kappa")
-def metric_kappa(labels, predictions, probabilities, sample_weight):
-    return float(cohen_kappa_score(labels, predictions, sample_weight=sample_weight))
-```
+> `average_precision`、`balanced_accuracy`、`mcc` 已内置注册，无需再添加。
 
 ### 8.3 新增交叉验证方法
 
@@ -699,80 +824,77 @@ validation:
       n_repeats: 10
 ```
 
-**新增留出法分拆器示例（空间分拆）：**
+**空间分拆器**（`spatial_block_kfold` / `spatial_group_kfold` / `spatial_block_holdout`）需要 `TrainingData.metadata["units"]` 中的 X/Y 坐标，且要求**投影坐标（米）**——经纬度坐标会触发明确错误。它们只能在 `raw_gis` 模式使用（`train_from_archive_features` 使用归档固定 train/test，且其研究单元不含坐标元数据）。空间分拆器的 `build_cv`/`split` 需要 `data` 参数，`build_cv` 会自动检测并传入。
+
+### 8.4 新增研究单元 / 采样器 / 标签策略 / 权重策略
+
+研究变量已注册化，由四个注册表驱动（`src/data/registries.py`）：
+
+| 注册表 | 内置实现 | 配置键 |
+|--------|---------|--------|
+| `RESEARCH_UNIT_REGISTRY` | `point_local_environment` | `research_unit.type` |
+| `BACKGROUND_SAMPLER_REGISTRY` | `random_points_in_nsw_boundary` | `research_unit.train_unlabeled` |
+| `LABEL_STRATEGY_REGISTRY` | `positive_unlabeled_as_zero` | `label.strategy` |
+| `WEIGHT_STRATEGY_REGISTRY` | `size_code`, `uniform` | `label.sample_weight`（由标签策略消费） |
+
+`Task` 只声明所需维度、空间支撑和输出类型，通过注册表调用具体实现，不再直接 import 模块级函数。配置中的 `research_unit.type`、`research_unit.train_unlabeled`、`label.strategy` 会被注册表校验并消费。
+
+**新增研究单元类型**（在 `src/data/research_unit_builtins.py` 中注册）：
 
 ```python
-@SPLITTER_REGISTRY.decorator("spatial_holdout")
-class SpatialHoldoutSplitter:
-    kind = "holdout"
+@RESEARCH_UNIT_REGISTRY.decorator("regular_grid")
+class RegularGridUnit:
+    name = "regular_grid"
 
-    @staticmethod
-    def validate_config(params: Mapping[str, Any]) -> None:
-        test_size = float(params.get("test_size", 0.25))
-        if not 0 < test_size < 1:
-            raise ValueError("test_size must be in (0, 1)")
+    def __init__(self, params):
+        self.params = dict(params)
 
-    def split(self, data: TrainingData, params: Mapping[str, Any], seed: int) -> SplitData:
-        # 基于空间坐标的分拆逻辑（需要 units 在 metadata 中）
-        units = data.metadata.get("units")
-        if units is None:
-            raise ValueError("spatial_holdout requires units in metadata")
-        # ... 实现空间分拆逻辑 ...
-        return SplitData(train_data, test_data)
+    def build_positive_units(self, occurrence_path, label_config):
+        ...
+
+    def build_prediction_units(self, boundary_path, grid_size):
+        ...
 ```
 
-### 8.4 新增研究单元构建方式
-
-研究单元的构建由 `Task` 负责。当前 `target_area_prediction` Task 在 `src/tasks/target_area.py` 中实现了三种单元构建方法：
-
-- `build_positive_units()` — 从矿点 shapefile 构建正样本
-- `build_unlabeled_units()` — 从边界内随机采样构建无标签样本
-- `build_prediction_units()` — 构建预测网格
-
-**方式一：修改正样本构建逻辑**（在 `src/data/research_units.py` 中修改 `build_positive_units()`）
+**新增背景采样器**（在 `src/data/samplers.py` 中注册）：
 
 ```python
-def build_positive_units(occurrence_path: str, label_config: Mapping[str, Any]) -> pd.DataFrame:
-    occurrences = load_vector(occurrence_path)
-    # 例：只用 SIZE_CODE 为大矿的矿点
-    if label_config.get("filter_large_only", False):
-        occurrences = occurrences[occurrences["SIZE_CODE"].isin(["VLG", "LGE"])]
-    labelled = positive_labels_from_size_code(occurrences, label_config)
-    return pd.DataFrame({
-        "X": labelled.geometry.x,
-        "Y": labelled.geometry.y,
-        "label": labelled["label"],
-        "sample_weight": labelled["sample_weight"],
-    }).reset_index(drop=True)
+@BACKGROUND_SAMPLER_REGISTRY.decorator("archive_fixed")
+class ArchiveFixedSampler:
+    name = "archive_fixed"
+
+    def sample(self, boundary_path, count, seed=None):
+        ...
 ```
 
-**方式二：修改无标签样本采样策略**（在 `src/data/research_units.py` 中修改 `sample_unlabeled_units()`）
+**新增标签策略**（在 `src/data/label_strategies.py` 中注册）：
 
 ```python
-def sample_unlabeled_units(boundary_path: str, count: int,
-                           label_config: Mapping[str, Any]) -> pd.DataFrame:
-    # 例：根据 label_config 调整正负样本比例
-    ratio = label_config.get("unlabeled_ratio", 1.0)
-    actual_count = int(count * ratio)
-    # ... 采样逻辑 ...
+@LABEL_STRATEGY_REGISTRY.decorator("occurrence_binary")
+class OccurrenceBinaryStrategy:
+    name = "occurrence_binary"
+
+    def apply_positive(self, occurrences, label_config):
+        ...
+
+    def apply_unlabeled(self, points, label_config):
+        ...
 ```
 
-**方式三：在 YAML 中通过 `research_unit` 配置控制行为**
+**新增样本权重策略**（在 `src/data/weight_strategies.py` 中注册）：
 
-```yaml
-research_unit:
-  type: point_local_environment
-  train_positive: occurrence_points
-  train_unlabeled: random_points_in_nsw_boundary
-  prediction_grid_size: 0.05      # 调整预测网格精度
-  # 可扩展的自定义字段（需要 Task 代码支持读取）
-  unlabeled_ratio: 1.5
-  buffer_distance: 500            # 矿点缓冲区距离（米）
+```python
+@WEIGHT_STRATEGY_REGISTRY.decorator("my_weight")
+class MyWeightStrategy:
+    name = "my_weight"
+
+    def compute(self, attributes, weight_config):
+        ...
 ```
 
-### 8.5 新增标签构造方式
+> 注意：`research_units.py` 与 `labels.py` 中的旧函数仍保留（一期兼容），新代码应使用注册化组件。
 
-标签策略的核心在 `src/data/labels.py`，当前实现为 `SIZE_CODE → sample_weight` 映射。
+### 8.5 调整标签与权重
 
 **修改权重映射：** 直接在 YAML 中调整 `label.sample_weight` 即可，无需改代码：
 
@@ -790,38 +912,28 @@ label:
     unlabeled: 0.5
 ```
 
-**新增标签策略：** 在 `src/data/labels.py` 中添加新的标签函数：
+`label.strategy` 的值由 `LABEL_STRATEGY_REGISTRY` 校验；`label.sample_weight` 中的 SIZE_CODE 映射由 `size_code` 权重策略消费。
 
-```python
-def binary_labels_from_mineral_type(
-    occurrences: pd.DataFrame,
-    label_config: Mapping[str, Any],
-) -> pd.DataFrame:
-    """根据矿种类型（COMMODITY 字段）进行二分类标签。"""
-    if "COMMODITY" not in occurrences.columns:
-        raise ValueError("Occurrence data must include COMMODITY")
-    result = occurrences.copy()
-    target_commodity = label_config.get("target_commodity", "Cu")
-    result["label"] = (result["COMMODITY"] == target_commodity).astype(int)
-    result["sample_weight"] = 0.5  # 统一权重
-    return result
-```
-
-然后在 `src/tasks/target_area.py` 的 `build_positive_units()` 中根据 `label_config["strategy"]` 选择不同的标签函数。
+> 提醒：`label.sample_weight` 只在 `raw_gis` 模式生效（那里才从 occurrence 的 SIZE_CODE 构造标签与权重）。`train_from_archive_features` 使用归档中已固定的标签与权重，改 `label.sample_weight` 不生效。
 
 ### 8.6 新增谓词（Predicate）
 
-谓词是在训练前对 `TrainingData` 进行变换的组件，要求**不改变行数**。
+谓词按 `kind` 分为两类（`src/predicates/builtins.py`）：
 
-**第一步：在 `src/predicates/builtins.py` 中注册**
+- `kind="constraint"`：生成 φ 向量写入 `TrainingData.constraints`，供支持 LUSI 约束的模型（`mlp`）消费。内置 `all_ones`、`spatial_box`、`spatial_distance`、`combined`。
+- `kind="data_transform"`：修改标签/权重/特征。**当前无内置 data_transform 谓词**，需自行注册。
+
+**所有谓词必须保持行数不变**；改变行数会在管线中报错（需显式重采样契约）。
+
+**第一步：注册一个 constraint 谓词**（生成 φ 向量）
 
 ```python
 @PREDICATE_REGISTRY.decorator("positive_constraint")
 class PositiveConstraintPredicate:
-    """强制要求某个地质分类特征必须为正（即该特征=1），
-    不符合约束的样本被标记为负类。"""
+    """根据某特征是否为 1 生成 φ 向量（示例，需自行注册）。"""
 
     name = "positive_constraint"
+    kind = "constraint"
 
     def __init__(self, params: Mapping[str, Any]):
         self.feature = str(params["feature"])
@@ -829,74 +941,38 @@ class PositiveConstraintPredicate:
 
     def apply(self, data: TrainingData, context: Mapping[str, Any]) -> TrainingData:
         import numpy as np
-        if self.feature in data.features.columns:
-            mask = data.features[self.feature] == 1
-            new_labels = data.labels.copy()
-            new_labels[~mask] = 0  # 不满足约束的样本 → 标记为负类
-            result = data.with_labels(
-                new_labels,
-                predicate_applied=self.name,
-                constrained_feature=self.feature,
-            )
-            return TrainingData(
-                result.features, result.labels, result.sample_weight,
-                constraints={**data.constraints, self.feature: "positive_required"},
-                metadata=result.metadata,
-            )
-        return data
+        phi = np.where(data.features[self.feature] == 1, 1.0, 0.0).astype(np.float32)
+        return data.with_constraints({"phi_vector": phi})
 ```
 
-**第二步：在 YAML 中启用**
+**第二步：在 YAML 中启用（须 `model.name=mlp` 且 `tuning.name=none`）**
 
 ```yaml
+model:
+  name: mlp
+tuning:
+  name: none
 predicates:
   enabled: true
   combine: sequential
   items:
     - name: positive_constraint
       params:
-        feature: Intrusions_Tabberabberan   # 要求侵入岩特征必须为正
+        feature: Intrusions_Tabberabberan
 ```
 
-**另一个谓词示例（样本加权调整）：**
-
-```python
-@PREDICATE_REGISTRY.decorator("weight_adjustment")
-class WeightAdjustmentPredicate:
-    """根据知识上下文调整样本权重。"""
-
-    name = "weight_adjustment"
-
-    def __init__(self, params: Mapping[str, Any]):
-        self.params = dict(params)
-
-    def apply(self, data: TrainingData, context: Mapping[str, Any]) -> TrainingData:
-        knowledge = context.get("knowledge", {})
-        multiplier = float(self.params.get("multiplier", 2.0))
-        favorable_ids = knowledge.get("favorable_indices", [])
-
-        new_weights = data.sample_weight.copy()
-        for idx in favorable_ids:
-            if idx < len(new_weights):
-                new_weights.iloc[idx] *= multiplier
-
-        return TrainingData(
-            data.features, data.labels, new_weights,
-            constraints=dict(data.constraints),
-            metadata={**data.metadata, "weight_adjusted": True},
-        )
-```
+> 注意：`positive_constraint`、`weight_adjustment` 等是文档示例组件，**当前未内置注册**，需自行注册后方可使用。RF/SPE/CNN 不支持约束（`supports_constraints=False`），配置了约束谓词会报错。
 
 ### 8.7 新增知识注入（Knowledge Provider）
 
-知识注入在谓词之前执行，用于**从外部知识源构建知识工件**（如地质图、已知矿化带、专家标注区域），供谓词或模型使用。
+知识注入在谓词之前执行，用于**从外部知识源构建知识工件**（如地质图、已知矿化带、专家标注区域），供谓词或模型使用。命名空间约定为 `context["knowledge"][provider_name]`。
 
 **第一步：在 `src/knowledge/providers.py` 中注册**
 
 ```python
 @KNOWLEDGE_REGISTRY.decorator("favorable_zone")
 class FavorableZoneKnowledgeProvider:
-    """从 shapefile 加载已知有利成矿区域，识别出位于有利区内的训练样本索引。"""
+    """从 shapefile 加载已知有利成矿区域，识别位于有利区内的训练样本索引。"""
 
     name = "favorable_zone"
 
@@ -905,28 +981,8 @@ class FavorableZoneKnowledgeProvider:
         self.params = dict(params)
 
     def build(self, data: TrainingData, context: Mapping[str, Any]) -> Mapping[str, Any]:
-        try:
-            import geopandas as gpd
-        except ImportError:
-            return {"favorable_indices": [], "zone_path": self.zone_path}
-
-        units = data.metadata.get("units")
-        if units is None:
-            return {"favorable_indices": [], "zone_path": self.zone_path}
-
-        zones = gpd.read_file(self.zone_path)
-        from shapely.geometry import Point
-        favorable = []
-        for i, (_, row) in enumerate(units.iterrows()):
-            point = Point(row["X"], row["Y"])
-            if any(zone.contains(point) for zone in zones.geometry):
-                favorable.append(i)
-
-        return {
-            "favorable_indices": favorable,
-            "zone_path": self.zone_path,
-            "count": len(favorable),
-        }
+        # 返回 dict 知识工件，例如 {"favorable_indices": [...]}
+        return {"favorable_indices": [...]}
 ```
 
 **第二步：在 YAML 中启用**
@@ -940,18 +996,17 @@ knowledge:
         zone_path: ../path/to/favorable_zones.shp
 ```
 
-### 8.8 知识注入 vs 谓词约束：区别是什么
+内置 `spatial_extent` 提供者会从研究单元坐标提取研究区域 bounds/center/span（供 `spatial_box`/`spatial_distance` 消费）；`empty` 用于验证链路。
 
-这是一个容易混淆的概念，这里重点说明：
+### 8.8 知识注入 vs 谓词约束：区别是什么
 
 | 维度 | 知识注入（Knowledge） | 谓词约束（Predicate） |
 |------|---------------------|---------------------|
 | **执行顺序** | 先执行（在谓词之前） | 后执行（在知识之后） |
-| **目的** | **读取外部知识，构建知识工件**（如索引列表、距离场、掩膜） | **使用知识工件，对训练数据做变换**（如筛选、加权、约束） |
-| **输入/输出** | 输入 `TrainingData` + `context`，输出 `dict`（知识工件） | 输入 `TrainingData` + `context`（含知识工件），输出 `TrainingData` |
-| **是否改变数据** | **不改变** `TrainingData` | **改变** `TrainingData`（标签、权重、约束等） |
-| **典型场景** | 加载地质图、计算矿化带距离、查询已知矿区 | 筛选有利区、调整权重、添加约束条件 |
-| **数据流** | `Knowledge.build()` → `context["knowledge"]` | `Predicate.apply(data, context["knowledge"])` |
+| **目的** | **读取外部知识，构建知识工件**（如索引列表、范围、掩膜） | **生成 φ 向量或变换数据**（constraint / data_transform） |
+| **输入/输出** | 输入 `TrainingData` + `context`，输出 `dict`（知识工件） | 输入 `TrainingData` + `context`（含 `context["knowledge"]`），输出 `TrainingData` |
+| **是否改变数据** | **不改变** `TrainingData` | **改变** `TrainingData`（constraints 或标签/权重） |
+| **典型场景** | 加载地质图、计算矿化带范围、查询已知矿区 | 生成 LUSI φ 向量（`all_ones`/`spatial_box`/`spatial_distance`/`combined`） |
 
 **数据流示意：**
 
@@ -959,421 +1014,285 @@ knowledge:
 TrainingData
     │
     ├── KnowledgePipeline.build(data, context)
-    │   ├── FavorableZoneKnowledgeProvider.build()  → {"favorable_indices": [0,3,5]}
     │   └── 结果存入 context["knowledge"]
     │
     └── PredicatePipeline.apply(data, context)
-        └── WeightAdjustmentPredicate.apply(data, context)
-            └── 读取 context["knowledge"]["favorable_indices"] → 调整权重
+        ├── data_transform 谓词（修改标签/权重）—— 当前无内置
+        └── constraint 谓词（生成 φ 向量）→ data.constraints → MLP 消费
 ```
 
-**设计原则：知识提供者负责"知道什么"，谓词负责"怎么用"。** 同一个知识工件可以被多个谓词以不同方式使用。
+**设计原则：知识提供者负责"知道什么"，谓词负责"计算什么描述量/约束"。** 完整的三层分离（Knowledge → Predicate 描述量 → Injection 使用方式）是后续演进方向，当前实现中谓词直接生成 constraint（LUSI φ 向量），尚未独立出 Injection 层。
 
 ### 8.9 新增其他组件总结
 
 | 扩展类型 | 在哪个文件写代码 | 注册装饰器 | 是否需要改 bootstrap.py | 是否需要改其他文件 |
 |---------|----------------|-----------|:--:|:--:|
-| 新模型 | `src/models/<name>.py` | `@MODEL_REGISTRY.decorator("name")` | 是 | 否 |
-| 新指标 | `src/validation/metrics.py` | `@_register("name")` | 否 | 否 |
+| 新模型 | `src/models/<name>.py` | `@MODEL_REGISTRY.decorator("name")` | 是（或 plugins） | 否 |
+| 新指标 | `src/validation/metrics.py` | `@METRIC_REGISTRY.decorator("name")` | 否 | 否 |
 | 新分拆器 | `src/validation/splitters.py` | `@SPLITTER_REGISTRY.decorator("name")` | 否 | 否 |
 | 新特征算子 | `src/operators/features/builtins.py` | `@FEATURE_OPERATOR_REGISTRY.decorator("name")` | 否 | 否 |
 | 新任务 | `src/tasks/<name>.py` | `@TASK_REGISTRY.decorator("name")` | 是 | 否 |
 | 新调优器 | `src/tuning/<name>.py` | `@TUNER_REGISTRY.decorator("name")` | 是 | 否 |
 | 新谓词 | `src/predicates/builtins.py` | `@PREDICATE_REGISTRY.decorator("name")` | 否 | 否 |
 | 新知识提供者 | `src/knowledge/providers.py` | `@KNOWLEDGE_REGISTRY.decorator("name")` | 否 | 否 |
+| 新研究单元 | `src/data/research_unit_builtins.py` | `@RESEARCH_UNIT_REGISTRY.decorator("name")` | 否 | 否 |
+| 新采样器 | `src/data/samplers.py` | `@BACKGROUND_SAMPLER_REGISTRY.decorator("name")` | 否 | 否 |
+| 新标签策略 | `src/data/label_strategies.py` | `@LABEL_STRATEGY_REGISTRY.decorator("name")` | 否 | 否 |
+| 新权重策略 | `src/data/weight_strategies.py` | `@WEIGHT_STRATEGY_REGISTRY.decorator("name")` | 否 | 否 |
 | 新标签细化器 | `src/models/<name>.py` | `@LABEL_REFINER_REGISTRY.decorator("name")` | 是 | 否 |
+
+### 8.10 通过 plugins 扩展组件
+
+也可以把组件放在外部模块，用 `plugins` 列表加载（不修改 bootstrap）：
+
+```yaml
+plugins:
+  - plugins.my_models
+
+model:
+  name: my_model
+```
+
+插件模块会在 `validate_config` 时被 import，触发其注册装饰器。
 
 ---
 
 ## 9. 实验对比指南
 
-以下是完整的实验对比类型及对应的 shell 命令示例。假设基准配置为 `lachlan_rf_phase2.yaml`。
+> **重要前提**：不同实验变体只有在其生效的执行模式下才有效。下表列出各对比类型与所需模式/配置，命令示例均为可直接运行的形式；涉及 `--set` 的覆盖都是标量。
 
-### 9.1 不同模型对比（各自固定配置，无调优）
+### 9.1 不同模型对比（各自固定配置）
 
-**目的：** 比较不同模型在各自默认参数下的性能差异。不同模型的参数空间不同，因此各自使用其推荐配置而非统一参数。
+**目的：** 比较不同模型在各自推荐参数下的性能差异。不同模型的参数空间不同，应使用各自独立的 base config，而不是只改 `model.name`。
 
 ```bash
-# RF 固定参数
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none experiment.name=compare_rf_fixed
+# RF 固定参数（无调参）
+python run.py --config configs/experiments/lachlan_rf_train.yaml \
+    --set experiment.name=compare_rf_fixed
 
-# SPE 固定参数
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set model.name=spe tuning.name=none experiment.name=compare_spe_fixed
+# SPE 固定参数（无调参）
+python run.py --config configs/experiments/lachlan_spe_notune.yaml \
+    --set experiment.name=compare_spe_fixed
 
-# CNN 固定参数
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set model.name=cnn tuning.name=none experiment.name=compare_cnn_fixed
+# MLP 固定参数（无调参）
+python run.py --config configs/experiments/lachlan_mlp.yaml \
+    --set experiment.name=compare_mlp_fixed
 ```
 
 ### 9.2 不同模型对比（带调优）
 
-**目的：** 比较不同模型在各自最优参数下的性能上限。
+**目的：** 比较不同模型在各自搜索空间、相同调参预算下的性能上限。
 
 ```bash
 # RF + 贝叶斯调优
 python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=bayes tuning.params.n_iter=200 experiment.name=compare_rf_tuned
+    --set tuning.params.n_iter=200 experiment.name=compare_rf_tuned
 
 # SPE + 贝叶斯调优
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set model.name=spe tuning.name=bayes tuning.params.n_iter=200 \
-    experiment.name=compare_spe_tuned
+python run.py --config configs/experiments/lachlan_spe.yaml \
+    --set tuning.params.n_iter=200 experiment.name=compare_spe_tuned
 
 # CNN + 贝叶斯调优
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set model.name=cnn tuning.name=bayes tuning.params.n_iter=100 \
-    experiment.name=compare_cnn_tuned
+python run.py --config configs/experiments/lachlan_cnn.yaml \
+    --set tuning.params.n_iter=100 experiment.name=compare_cnn_tuned
 ```
 
 ### 9.3 相同模型多种子点实验
 
-**目的：** 评估模型的随机稳定性，报告均值±标准差。
+**目的：** 评估模型的随机稳定性，报告均值±标准差。现在修改 `experiment.seed` 会真正改变 RF/SPE/CNN/MLP 的随机性。
 
 ```bash
-# 用不同随机种子重复运行
 for seed in 42 123 456 789 2026; do
-    python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-        --set tuning.name=none experiment.seed=$seed \
-        experiment.name="rf_seed_${seed}"
+    python run.py --config configs/experiments/lachlan_rf_train.yaml \
+        --set experiment.seed=$seed experiment.name="rf_seed_${seed}"
 done
 ```
 
-### 9.4 不同预测网格尺度实验
+### 9.4 不同预测网格尺度实验（`raw_gis`）
 
-**目的：** 比较不同预测网格精度对预测结果的影响。
+**目的：** 比较不同预测网格精度。`research_unit.prediction_grid_size` 只在 `raw_gis` 模式生效。
 
 ```bash
 # 默认网格精度 0.05
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none research_unit.prediction_grid_size=0.05 \
-    experiment.name=ru_grid_005
+python run.py --config configs/experiments/lachlan_rf_raw_gis.yaml \
+    --set experiment.name=ru_grid_005
 
 # 粗网格 0.1
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none research_unit.prediction_grid_size=0.1 \
-    experiment.name=ru_grid_010
+python run.py --config configs/experiments/lachlan_rf_raw_gis.yaml \
+    --set research_unit.prediction_grid_size=0.1 experiment.name=ru_grid_010
 
 # 细网格 0.025
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none research_unit.prediction_grid_size=0.025 \
-    experiment.name=ru_grid_0025
+python run.py --config configs/experiments/lachlan_rf_raw_gis.yaml \
+    --set research_unit.prediction_grid_size=0.025 experiment.name=ru_grid_0025
 ```
 
-### 9.5 不同样本权重策略实验
+### 9.5 不同样本权重策略实验（`raw_gis`）
 
-**目的：** 比较不同样本权重设置对模型的影响。
+**目的：** 比较不同样本权重设置。`label.sample_weight` 只在 `raw_gis` 模式生效（从 SIZE_CODE 构造）。
 
 ```bash
-# 默认权重（VLG=0.5, LGE=0.4, MED=0.3, SML=0.2, OCC=0.1, unlabeled=0.5）
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none experiment.name=label_default
+# 默认权重
+python run.py --config configs/experiments/lachlan_rf_raw_gis.yaml \
+    --set experiment.name=label_default
 
-# 高权重（大矿权重更高，强调大矿）
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none \
-    label.sample_weight.VLG=0.8 \
-    label.sample_weight.LGE=0.6 \
-    label.sample_weight.MED=0.4 \
+# 高权重（强调大矿）
+python run.py --config configs/experiments/lachlan_rf_raw_gis.yaml \
+    --set label.sample_weight.VLG=0.8 label.sample_weight.LGE=0.6 label.sample_weight.MED=0.4 \
     experiment.name=label_high_weight
 
-# 均匀权重（不区分矿点大小）
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none \
-    label.sample_weight.VLG=0.5 \
-    label.sample_weight.LGE=0.5 \
-    label.sample_weight.MED=0.5 \
-    label.sample_weight.SML=0.5 \
-    label.sample_weight.OCC=0.5 \
-    experiment.name=label_uniform
+# 均匀权重
+python run.py --config configs/experiments/lachlan_rf_raw_gis.yaml \
+    --set label.sample_weight.VLG=0.5 label.sample_weight.LGE=0.5 label.sample_weight.MED=0.5 \
+    label.sample_weight.SML=0.5 label.sample_weight.OCC=0.5 experiment.name=label_uniform
 ```
 
-### 9.6 相同模型不同谓词对比
+### 9.6 空间验证 vs 随机验证（`raw_gis`）
 
-**目的：** 比较不同谓词约束对预测结果的影响。
+**目的：** 比较空间分块与随机点划分对评估结果的影响。空间分拆器只在 `raw_gis` 模式可用，且需投影坐标（米）。
+
+```bash
+# 随机留出（基线，存在空间泄漏风险）
+python run.py --config configs/experiments/lachlan_rf_raw_gis.yaml \
+    --set experiment.name=val_random
+
+# 空间块留出法
+python run.py --config configs/experiments/lachlan_rf_raw_gis.yaml \
+    --set validation.holdout.name=spatial_block_holdout \
+    validation.holdout.params.block_size_m=50000 \
+    experiment.name=val_spatial_holdout
+
+# 空间块 K-Fold 交叉验证
+python run.py --config configs/experiments/lachlan_rf_raw_gis.yaml \
+    --set validation.cross_validation.name=spatial_block_kfold \
+    validation.cross_validation.params.block_size_m=50000 \
+    experiment.name=val_spatial_kfold
+```
+
+> 空间分拆器要求 `TrainingData.metadata["units"]` 中的 X/Y 为投影坐标；经纬度会触发明确错误，需先重投影到 UTM 等度量 CRS。
+
+### 9.7 谓词约束对比（MLP + LUSI，`tuning=none`）
+
+**目的：** 比较不同谓词约束（LUSI 统计不变量）对 MLP 的影响。约束谓词只能由 `mlp` 消费，且需 `tuning=none`（贝叶斯 + 约束未支持）。
 
 ```bash
 # 无谓词（基线）
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none predicates.enabled=false experiment.name=pred_none
+python run.py --config configs/experiments/lachlan_mlp.yaml \
+    --set experiment.name=pred_none
 
-# 使用 all_ones 谓词（验证链路，不做任何变换）
-# 注意：--set 不支持列表索引路径，请使用专用 YAML 配置文件
-# 参见 configs/experiments/ 目录下的谓词配置示例
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none predicates.enabled=true \
-    experiment.name=pred_all_ones
-
-# 使用自定义谓词（需要先注册，在专用 YAML 中配置）
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none predicates.enabled=true \
-    experiment.name=pred_intrusion_constraint
+# all_ones 控制谓词（验证链路）
+python run.py --config configs/experiments/lachlan_mlp.yaml \
+    --set predicates.enabled=true experiment.name=pred_all_ones
 ```
 
-### 9.7 不同知识注入对比
+> 注意：谓词 `items` 是列表，`--set` 不支持列表值或列表索引。要配置 `all_ones`/`spatial_box` 等具体谓词，需复制 `lachlan_mlp.yaml` 为专用配置，在 YAML 中写入 `predicates.items`。`spatial_box`/`spatial_distance` 需要坐标，只能在 `raw_gis` 模式（或带坐标元数据的场景）使用。
 
-**目的：** 比较不同知识来源对模型的增强效果。
+### 9.8 知识注入对比
+
+**目的：** 比较知识提供者对模型的影响。知识 `items` 是列表，需专用 YAML。
 
 ```bash
 # 无知识注入（基线）
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none knowledge.enabled=false experiment.name=knowledge_none
+python run.py --config configs/experiments/lachlan_mlp.yaml \
+    --set experiment.name=knowledge_none
 
-# 使用 empty 知识提供器（验证链路）
-# 注意：knowledge.items 是列表，`--set` 不支持列表索引；需复制
-# lachlan_rf_phase2.yaml 为专用配置，在 YAML 中写入 knowledge.items。
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none knowledge.enabled=true \
-    experiment.name=knowledge_empty
-
-# 知识 + 谓词联合使用 —— favorable_zone / weight_adjustment 为 GUIDE 示例组件，
-# 尚未内置注册，需先自行注册后，再在专用 YAML 中配置 items 列表。
+# 使用 spatial_extent 知识（需 raw_gis 模式才有坐标元数据）
+# 需复制 lachlan_rf_raw_gis.yaml 为专用配置，写入 knowledge.items: [{name: spatial_extent, params: {}}]
 ```
 
-### 9.8 不同知识使用方式对比
+### 9.9 不同特征算子实验（`raw_gis`，专用 YAML）
 
-**目的：** 比较同一知识的不同使用方式。
+**目的：** 比较不同特征集。特征算子只在 `raw_gis` 模式执行；`--set` 不支持列表值。需以 `lachlan_rf_raw_gis.yaml` 为模板，自行创建专用 YAML（如 `lachlan_rf_feat_geology.yaml`），在其中修改 `features.operators` 列表。
 
-**注意：** 以下示例中 `favorable_zone`、`positive_constraint`、`weight_adjustment` 均为 GUIDE 中展示的示例组件，尚未内置注册。知识→模型约束（方式三）当前未实现，需要用户在 `src/predicates/builtins.py` 中自行注册谓词后方可使用。
-
-```bash
-# 方式一：知识→谓词（筛选样本）— 需要先注册谓词
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none \
-    knowledge.enabled=true \
-    predicates.enabled=true \
-    experiment.name=knowledge_use_filter
-
-# 方式二：知识→谓词（加权调整）— 需要先注册谓词
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none \
-    knowledge.enabled=true \
-    predicates.enabled=true \
-    experiment.name=knowledge_use_weight
-
-# 方式三：知识→模型约束（通过 constraints）— 当前未实现
-# 需要在模型中实现 constraints 支持后使用
+```yaml
+# 例如：仅地质 + 线距离特征
+features:
+  operators:
+    - name: line_distance
+      params: {distance_type: geodesic}
+    - name: categorical_geology
+      params: {}
 ```
 
-### 9.9 相同模型不同特征算子实验
-
-**目的：** 比较不同特征集对预测性能的影响。
-
-**注意：** 特征算子只在 `raw_gis` 模式下执行；`train_from_archive_features` 使用归档固定特征，不能更换算子。且 `--set` 不支持列表值。要比较不同特征集，需以 `lachlan_rf_raw_gis.yaml` 为模板，自行创建专用 YAML 配置（例如 `lachlan_rf_feat_geology.yaml`），在其中修改 `features.operators` 列表。以下命令假定你已创建这些配置。
-
 ```bash
-# 全部特征（基线）
-python run.py --config configs/experiments/lachlan_rf_raw_gis.yaml \
-    --set tuning.name=none experiment.name=feat_all
-
-# 仅地质+线距离特征 — 需自行创建的专用 YAML
 python run.py --config configs/experiments/lachlan_rf_feat_geology.yaml \
-    --set tuning.name=none experiment.name=feat_geology_only
-
-# 仅地球物理特征 — 需自行创建的专用 YAML
-python run.py --config configs/experiments/lachlan_rf_feat_geophysics.yaml \
-    --set tuning.name=none experiment.name=feat_geophysics_only
+    --set experiment.name=feat_geology_only
 ```
 
-### 9.10 相同模型不同预处理参数实验
+### 9.10 不同预处理参数实验（`raw_gis`）
 
-**目的：** 比较不同预处理参数的影响。
-
-**注意：** 预处理（相关性筛选 / OneHot / 标准化）只在 `raw_gis` 模式下拟合；`train_from_archive_features` 使用归档中已固定的特征，`preprocess.*` 不生效。以下命令基于 `raw_gis` 配置。
+**目的：** 比较相关性筛选阈值。预处理只在 `raw_gis` 模式拟合（fold-safe）。
 
 ```bash
 # 默认相关性阈值 0.7
 python run.py --config configs/experiments/lachlan_rf_raw_gis.yaml \
-    --set tuning.name=none preprocess.correlation_threshold=0.7 \
-    experiment.name=prep_corr_07
+    --set preprocess.correlation_threshold=0.7 experiment.name=prep_corr_07
 
-# 更严格的相关性阈值 0.5
+# 更严格 0.5
 python run.py --config configs/experiments/lachlan_rf_raw_gis.yaml \
-    --set tuning.name=none preprocess.correlation_threshold=0.5 \
-    experiment.name=prep_corr_05
-
-# 更宽松的相关性阈值 0.9
-python run.py --config configs/experiments/lachlan_rf_raw_gis.yaml \
-    --set tuning.name=none preprocess.correlation_threshold=0.9 \
-    experiment.name=prep_corr_09
+    --set preprocess.correlation_threshold=0.5 experiment.name=prep_corr_05
 ```
 
-### 9.11 相同模型不同验证策略实验
+### 9.11 不同标签细化（PUB）实验（`raw_gis`）
 
-**目的：** 比较不同验证方式对评估结果的影响。
-
-```bash
-# 默认：random_holdout test_size=0.25 + stratified_kfold n_splits=10
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none experiment.name=val_default
-
-# 更小的测试集
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none validation.holdout.params.test_size=0.2 \
-    experiment.name=val_testsize_02
-
-# 更大的测试集
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none validation.holdout.params.test_size=0.33 \
-    experiment.name=val_testsize_033
-
-# 不同的 K 折
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none validation.cross_validation.params.n_splits=5 \
-    experiment.name=val_kfold_5
-
-# 不同的主要指标
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none validation.primary_metric=roc_auc \
-    experiment.name=val_metric_auc
-```
-
-### 9.12 相同模型不同标签细化（PUB）实验
-
-**目的：** 比较是否使用 PUB 标签细化对模型性能的影响。
+**目的：** 比较是否使用 PUB 标签细化。PUB 只在 `raw_gis` 模式执行，且仅在训练折内拟合。
 
 ```bash
-# 启用 PUB（标签细化）
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none label_refinement.enabled=true \
-    experiment.name=pub_enabled
+# 启用 PUB（label_refinement）
+python run.py --config configs/experiments/lachlan_rf_raw_gis.yaml \
+    --set label_refinement.enabled=true experiment.name=pub_enabled
 
 # 禁用 PUB（基线）
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none label_refinement.enabled=false \
-    experiment.name=pub_disabled
+python run.py --config configs/experiments/lachlan_rf_raw_gis.yaml \
+    --set label_refinement.enabled=false experiment.name=pub_disabled
 ```
 
-### 9.13 不同地区对比实验
+> `train_from_archive_features` 模式下 `label_refinement.enabled=true` 会在配置校验阶段被拒绝（归档标签已固定）。
 
-**目的：** 比较同一模型在不同研究区的表现。
+### 9.12 不同地区对比实验
 
 ```bash
 # Lachlan 地区
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none experiment.name=region_lachlan
+python run.py --config configs/experiments/lachlan_rf_train.yaml \
+    --set experiment.name=region_lachlan
 
-# NSW 地区（需要对应的 NSW 配置文件）
+# NSW 地区（归档回放）
 python run.py --config configs/experiments/nsw_rf_baseline.yaml \
-    --set tuning.name=none experiment.name=region_nsw
+    --set experiment.name=region_nsw
 ```
 
-### 9.14 消融实验（Ablation Study）
-
-**目的：** 逐一移除组件，确定每个组件对最终性能的贡献。
+### 9.13 参数敏感性分析
 
 ```bash
-# 完整配置（基线）
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set experiment.name=ablation_full
-
-# 移除 PUB 标签细化
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set label_refinement.enabled=false experiment.name=ablation_no_pub
-
-# 移除调优（固定参数）
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set tuning.name=none experiment.name=ablation_no_tune
-
-# 移除 PUB + 移除调优
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-    --set label_refinement.enabled=false tuning.name=none \
-    experiment.name=ablation_no_pub_no_tune
-```
-
-### 9.15 参数敏感性分析
-
-**目的：** 分析单个参数对模型性能的影响。
-
-```bash
-# 分析 n_estimators 的影响
+# 分析 RF n_estimators 的影响（无调参 + 覆盖模型参数）
 for n in 10 50 100 200 500; do
-    python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-        --set tuning.name=none model.params.n_estimators=$n \
-        experiment.name="sensitivity_n_est_${n}"
+    python run.py --config configs/experiments/lachlan_rf_train.yaml \
+        --set model.params.n_estimators=$n experiment.name="sensitivity_n_est_${n}"
 done
 
-# 分析 max_depth 的影响
+# 分析 RF max_depth 的影响
 for d in 3 5 10 15 20 30; do
-    python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
-        --set tuning.name=none model.params.max_depth=$d \
-        experiment.name="sensitivity_depth_${d}"
+    python run.py --config configs/experiments/lachlan_rf_train.yaml \
+        --set model.params.max_depth=$d experiment.name="sensitivity_depth_${d}"
 done
 ```
 
-### 9.16 完整批处理实验脚本模板
+### 9.14 实验对比类型总览
 
-> **模板说明**：以下脚本是**需要按实际情况改写**的模板。不同模型（RF/SPE/CNN/MLP）需要各自的 `model.params` 与搜索空间，不能仅切换 `model.name`；不同特征组合需先基于 `raw_gis` 模式创建专用 YAML（见 9.9）。直接照抄可能因配置校验失败而中止。
-
-```bash
-#!/bin/bash
-# batch_experiments.sh — 批量运行实验对比
-
-BASE_CONFIG="configs/experiments/lachlan_rf_phase2.yaml"
-BASE_SET="tuning.name=none label_refinement.enabled=false"
-
-echo "=== 1. 不同模型对比 ==="
-for model in rf spe cnn; do
-    echo "Running model=$model..."
-    python run.py --config "$BASE_CONFIG" \
-        --set $BASE_SET model.name=$model \
-        experiment.name="batch_model_${model}"
-done
-
-echo "=== 2. 不同随机种子 ==="
-for seed in 42 123 456 789 2026; do
-    echo "Running seed=$seed..."
-    python run.py --config "$BASE_CONFIG" \
-        --set $BASE_SET model.name=rf experiment.seed=$seed \
-        experiment.name="batch_seed_${seed}"
-done
-
-echo "=== 3. 不同特征组合 ==="
-echo "Running all features..."
-python run.py --config "$BASE_CONFIG" \
-    --set $BASE_SET model.name=rf experiment.name="batch_feat_all"
-
-echo "Running geology only (use dedicated YAML config)..."
-python run.py --config configs/experiments/lachlan_rf_feat_geology.yaml \
-    --set $BASE_SET model.name=rf experiment.name="batch_feat_geology"
-
-echo "=== 4. 不同标签权重 ==="
-echo "Running default weights..."
-python run.py --config "$BASE_CONFIG" \
-    --set $BASE_SET model.name=rf experiment.name="batch_label_default"
-
-echo "Running uniform weights..."
-python run.py --config "$BASE_CONFIG" \
-    --set $BASE_SET model.name=rf \
-    label.sample_weight.VLG=0.5 label.sample_weight.LGE=0.5 \
-    label.sample_weight.MED=0.5 label.sample_weight.SML=0.5 \
-    label.sample_weight.OCC=0.5 \
-    experiment.name="batch_label_uniform"
-
-echo "=== All experiments complete ==="
-echo "Results are in outputs/ directory"
-```
-
-### 9.17 实验对比类型总览
-
-| 编号 | 对比类型 | 变动的 YAML 配置节 | 示例命令节 |
-|:----:|---------|-------------------|:--:|
-| 1 | 不同模型对比（各自固定配置） | `model.name` | 9.1 |
-| 2 | 不同模型对比（带调优） | `model.name` + `tuning.*` | 9.2 |
-| 3 | 相同模型多种子 | `experiment.seed` | 9.3 |
-| 4 | 不同预测网格尺度 | `research_unit.*` | 9.4 |
-| 5 | 不同样本权重策略 | `label.sample_weight.*` | 9.5 |
-| 6 | 不同谓词约束 | `predicates.*` | 9.6 |
-| 7 | 不同知识注入 | `knowledge.*` | 9.7 |
-| 8 | 知识+谓词不同组合方式 | `knowledge.*` + `predicates.*` | 9.8 |
-| 9 | 不同特征集 | `features.operators[]` | 9.9 |
-| 10 | 不同预处理参数 | `preprocess.*` | 9.10 |
-| 11 | 不同验证策略 | `validation.*` | 9.11 |
-| 12 | 不同标签细化 | `label_refinement.*` | 9.12 |
-| 13 | 不同地区 | `dataset.*` + `task.region` | 9.13 |
-| 14 | 消融实验 | 多配置节组合 | 9.14 |
-| 15 | 参数敏感性 | `model.params.*` | 9.15 |
+| 编号 | 对比类型 | 生效模式 | 变动的 YAML 配置节 |
+|:----:|---------|:--:|-------------------|
+| 1 | 不同模型（固定配置） | archive-features | `model.name`（用各模型独立 YAML） |
+| 2 | 不同模型（带调优） | archive-features | `model.name` + `tuning.*` |
+| 3 | 相同模型多种子 | 任意训练模式 | `experiment.seed` |
+| 4 | 不同预测网格尺度 | raw_gis | `research_unit.prediction_grid_size` |
+| 5 | 不同样本权重 | raw_gis | `label.sample_weight.*` |
+| 6 | 空间 vs 随机验证 | raw_gis | `validation.holdout/cross_validation.name` |
+| 7 | 谓词约束（LUSI） | mlp + tuning=none | `predicates.items[]`（专用 YAML） |
+| 8 | 知识注入 | raw_gis | `knowledge.items[]`（专用 YAML） |
+| 9 | 不同特征集 | raw_gis | `features.operators[]`（专用 YAML） |
+| 10 | 不同预处理参数 | raw_gis | `preprocess.*` |
+| 11 | 不同标签细化（PUB） | raw_gis | `label_refinement.enabled` |
+| 12 | 不同地区 | 各自配置 | `dataset.*` + `task.region` |
+| 13 | 参数敏感性 | archive-features | `model.params.*` |
 
 ---
 
@@ -1388,16 +1307,25 @@ echo "Results are in outputs/ directory"
 | `dataset` | 数据路径 | `root`, `archive_dir`, `occurrence`, `boundary`, `training_boundary`, `geology`, `magnetic`, `gravity`, `radiometric`, `remote_sensing`, `elevation`, `seismic` | 是 |
 | `research_unit` | 研究单元参数 | `type`, `train_positive`, `train_unlabeled`, `prediction_grid_size` | 是 |
 | `label` | 标签策略 | `strategy`, `positive_value`, `unlabeled_value`, `sample_weight`（SIZE_CODE 映射） | 是 |
-| `features.operators` | 特征算子列表 | 每个算子有 `name` + `params` | 是 |
+| `features.operators` | 特征算子列表 | 每个算子有 `name` + `params`；archive 模式须为 `[]` | 是 |
 | `preprocess` | 预处理参数 | `correlation_threshold`, `categorical_encoding`, `scaling` | 是 |
 | `model` | 模型配置 | `name`（注册名）, `params`（模型参数） | 是 |
 | `tuning` | 超参数调优 | `name`（`none`/`bayes`）, `params.n_iter`, `params.search_space` | 是 |
 | `validation` | 验证方式 | `holdout`, `cross_validation`, `metrics[]`, `primary_metric` | 是 |
-| `prediction` | 预测输出 | `score_type`, `normalization`, `export_geotiff` | 是 |
+| `prediction` | 预测输出 | `score_type`, `normalization`, `export_geotiff`, `target_crs` | 是 |
 | `label_refinement` | PUB 标签细化 | `enabled`, `name`, `params` | 否 |
 | `knowledge` | 知识注入 | `enabled`, `items[]` | 否 |
 | `predicates` | 谓词约束 | `enabled`, `combine`, `items[]` | 否 |
 | `plugins` | 外部插件模块 | 模块名列表 | 否 |
+
+### `prediction` 节字段
+
+| 字段 | 取值 | 说明 |
+|------|------|------|
+| `score_type` | `probability` / `raw_score` / `relative_score` | 输出列语义（见 §4.6） |
+| `normalization` | `none` / `minmax` | 仅 `relative_score` 可用 `minmax` |
+| `export_geotiff` | `true` / `false` | 是否导出 GeoTIFF |
+| `target_crs` | EPSG 整数 或 WKT/proj4 字符串 | **`export_geotiff=true` 时必填**（Lachlan/NSW 归档用 GDA94/EPSG:4283） |
 
 ### 搜索空间配置语法
 
@@ -1427,26 +1355,32 @@ learning_rate:
 
 ## 11. 输出目录结构
 
-每次实验运行后，`outputs/<实验名称>_<时间戳>/` 目录包含：
+每次实验运行后，`outputs/<实验名称>_<run_id>/` 目录包含：
 
 ```
-lachlan_rf_phase2_test_20260901_143052/
+lachlan_rf_train_20260901_143052_123456/
 ├── config_resolved.yaml    # ★ 合并后的完整配置（含 DEFAULTS + Phase1迁移 + CLI覆盖）
 ├── experiment.log          # 结构化日志（包含每个阶段的耗时）
 ├── manifest.json           # 可复现性清单
-│   ├── timestamp           #   运行时间
-│   ├── git_commit          #   Git commit hash
+│   ├── run_id              #   运行 ID（微秒级时间戳）
+│   ├── timestamp / status  #   运行时间与状态（created/running/completed/failed）
+│   ├── seed / derived_seeds#   基础种子与派生种子表
+│   ├── git_commit / git_dirty  # Git 信息
+│   ├── environment         #   Python/平台/核心依赖版本
 │   ├── config              #   完整配置
-│   ├── components          #   使用的组件列表
-│   ├── input_paths         #   输入文件路径 + SHA256 哈希
-│   ├── feature_schema      #   特征列名列表
-│   └── output_files        #   输出文件列表 + SHA256 哈希
+│   ├── components          #   声明的组件列表
+│   ├── component_metadata  #   实际执行/标记为预计算的组件
+│   ├── input_paths         #   输入文件路径 + SHA256（含 shapefile sidecar/栅格目录）
+│   ├── feature_schema / feature_count  #   特征列名/数量
+│   ├── split_summary       #   train/test 行数与正类数
+│   ├── best_params         #   调优得到的最优参数
+│   └── output_files        #   输出文件列表 + SHA256
 ├── metrics.json            # 评估指标
 ├── models/
-│   ├── model_rf.pkl        # 序列化模型（或 model_spe.pkl / model_cnn.pkl 等）
+│   ├── model_rf.pkl        # 序列化模型（或 model_spe.pkl / model_cnn.pkl / model_mlp.pkl）
 │   └── model_pub.pkl       # PUB 标签细化模型（如果启用）
 ├── predictions/
-│   ├── target_probs.csv    # 预测概率表（X, Y, prob）
+│   ├── target_probs.csv    # 预测分数表（X, Y, prob/raw_score/relative_score）
 │   └── probability_map.tif # 概率 GeoTIFF（如果 export_geotiff=true）
 ├── figures/                # 评估图表
 └── intermediate/           # 中间数据快照
@@ -1495,60 +1429,92 @@ python scripts/list_components.py
 # 路径相对于 configs/experiments/ 的父目录（即项目根目录）解析
 ```
 
+### 模式能力边界报错
+
+```bash
+# 错误：archive_replay mode does not use tuning ...
+# 或：train_from_archive_features mode uses archived features; feature operators do not execute ...
+# 原因：在某个执行模式下配置了不生效的字段，框架在 validate 阶段硬失败
+# 解决：按 §4.3 能力边界表调整配置，或切换到支持该字段的执行模式
+```
+
 ### CLI 覆盖不生效
 
 ```bash
 # 先用 --validate-only 检查覆盖后的配置
-python run.py --config configs/experiments/lachlan_rf_phase2.yaml \
+python run.py --config configs/experiments/lachlan_rf_train.yaml \
     --validate-only --set model.name=spe
 
 # 确认输出的 JSON 中 model 字段是否已变为 "spe"
 # 如果覆盖失败，检查 key 路径是否正确（使用点号分隔：model.name 不是 model:name）
+# 列表/JSON/列表索引路径的 --set 不支持，会直接报错
 ```
 
-### 模型训练失败
+### 模型训练失败（可选依赖）
 
 ```bash
 # 错误：OptionalDependencyError
 # 原因：缺少模型所需的可选依赖
 # 解决：
-pip install xgboost          # XGBoost
-pip install scikit-optimize  # 贝叶斯调优
-pip install torch            # CNN (PyTorch)
+pip install scikit-optimize  # 贝叶斯调优（tuning.name=bayes）
 pip install pulearn          # PUB 标签细化
+pip install torch            # CNN / MLP (PyTorch)
+pip install geopandas shapely rasterio scikit-image  # raw_gis 特征提取
+# export_geotiff=true 需要 GDAL Python 绑定（osgeo）
+```
+
+### GeoTIFF 导出失败
+
+```bash
+# 错误：prediction.target_crs must be set when export_geotiff=true
+# 原因：导出 GeoTIFF 需要显式目标 CRS
+# 解决：在 prediction 节添加 target_crs（如 Lachlan 用 4283），或设 export_geotiff=false
+```
+
+### 空间分拆器报错
+
+```bash
+# 错误：spatial block splitting requires projected coordinates (meters) ...
+# 原因：坐标是经纬度，不能按米为单位分块
+# 解决：先把研究单元重投影到 UTM 等投影 CRS
+
+# 错误：Spatial splitter requires coordinate metadata ...
+# 原因：该模式没有 units 坐标元数据（如 archive-features 模式）
+# 解决：改用 raw_gis 模式
+```
+
+### 贝叶斯 + 谓词约束报错
+
+```bash
+# 错误：Bayesian tuning with predicate constraints is not yet supported ...
+# 原因：BayesSearchCV 无法按折切分 φ 向量
+# 解决：使用 tuning.name=none + 支持约束的模型（mlp）
 ```
 
 ### 输出目录被覆盖
 
 ```bash
-# 框架已自动为每次运行添加时间戳后缀，不会覆盖
-# 输出目录格式：outputs/<实验名>_YYYYMMDD_HHMMSS/
+# 框架已自动为每次运行添加微秒级时间戳后缀，不会覆盖
+# 输出目录格式：outputs/<实验名>_YYYYMMDD_HHMMSS_微秒/
 # 可以通过 experiment.name 区分不同实验
 python run.py --config ... --set experiment.name=my_unique_name
 ```
 
 ### 空间泄漏风险
 
-使用 `random_holdout` 分拆器时，训练集和测试集的样本可能在空间上相邻或重叠，导致**空间泄漏（spatial leakage）**，使评估指标过于乐观。框架已内置空间交叉验证分拆器来解决此问题：
+使用 `random_holdout` 分拆器时，训练集和测试集的样本可能在空间上相邻或重叠，导致**空间泄漏（spatial leakage）**，使评估指标过于乐观。框架已内置空间分拆器（仅 `raw_gis` 模式）：
 
 ```bash
-# 使用空间块留出法（推荐替换 random_holdout）
+# 使用空间块留出法
 python run.py --config configs/experiments/lachlan_rf_raw_gis.yaml \
     --set validation.holdout.name=spatial_block_holdout \
     validation.holdout.params.block_size_m=50000
 
-# 使用空间块 K-Fold 交叉验证
+# 使用空间块 K-Fold
 python run.py --config configs/experiments/lachlan_rf_raw_gis.yaml \
     --set validation.cross_validation.name=spatial_block_kfold \
     validation.cross_validation.params.block_size_m=50000
-
-# 使用已有分组 ID 的空间分组 K-Fold（如矿集区/地质域）
-python run.py --config configs/experiments/lachlan_rf_raw_gis.yaml \
-    --set validation.cross_validation.name=spatial_group_kfold \
-    validation.cross_validation.params.group_column=group_id
 ```
-
-**空间分拆器要求**：只能在 `raw_gis` 模式下使用（`train_from_archive_features` 使用归档固定的 train/test 划分，不执行 holdout；`archive_replay` 不训练）。空间分拆器需要 `TrainingData.metadata["units"]` 中的 X/Y 坐标，且要求**投影坐标（米）**——经纬度坐标会触发明确错误，需先重投影到 UTM 等度量 CRS。
 
 ### 如何确认 config_resolved.yaml 是最终参数
 
@@ -1561,3 +1527,50 @@ python run.py --config configs/experiments/lachlan_rf_raw_gis.yaml \
 5. 解析后的绝对路径（dataset 路径）
 
 所以 `config_resolved.yaml` 是实验实际使用的完整参数，可直接用于复现。
+
+---
+
+## 13. 能力状态与已知限制
+
+### 13.1 能力状态
+
+| 组件/能力 | 状态 | 说明 |
+|-----------|------|------|
+| `target_area_prediction` | `implemented` | 二维靶区预测 |
+| `deep_edge_prediction` | `placeholder` | 实例化即报错，无三维能力 |
+| RF | `implemented` | 主要基线 |
+| SPE | `experimental` | 未与 `imbalanced-ensemble.SelfPacedEnsembleClassifier` 做固定种子一致性验证 |
+| CNN | `experimental` | 将任意列顺序视为 1D 邻域，未做列置换敏感性实验 |
+| MLP + LUSI | `experimental` | LUSI 损失数值对齐未验证（`(1/N)·‖φ̃ᵀe‖²` vs TSIL `‖(1/B)·Φᵀe‖²`） |
+| 概率校准 | **未实现** | 无 `calibrated_probability`、calibration curve、Brier/log loss |
+| MPM 面积指标 | `implemented`（未接入数据） | `mpm_metrics.py` 已接入 `evaluate_classifier`，但需数据源提供 `unit_area` 才会计算 |
+| 空间验证 | `implemented`（仅 raw_gis） | 需要投影坐标与 units 元数据 |
+| 贝叶斯 + 谓词约束 | **未支持** | 显式报错，需 constraint-aware CV splitter |
+| GeoTIFF 模板继承 | 部分 | 半像元定位已完成；尚未完全继承源栅格 transform/分辨率/nodata |
+| Knowledge → Predicate → Injection 三层分离 | 部分 | Knowledge 与 Predicate 已分离；Injection 层未独立 |
+
+### 13.2 科学使用注意事项
+
+1. **未标注样本 ≠ 已验证负样本。** 当前 `positive_unlabeled_as_zero` 把随机背景点临时编码为 0 类；随机未标注点没有已知矿点排除缓冲、勘探覆盖修正或 verified barren 证据，不能作为真实负样本解释评估指标。
+2. **`probability` 不是校准概率。** 未经独立校准集或 OOF 校准，不能按概率阈值做勘查决策；`relative_score`（MinMax）更不能跨区比较。
+3. **随机 CV 只用于偏差诊断。** 空间自相关会高估随机点划分下的泛化能力；正式研究结论应使用空间分块/分组验证并分开报告。
+4. **`archive_replay` 不是计算复现。** 它复制归档模型与预测、不重算指标，只能证明工件一致性，不能证明当前代码能从原始 GIS 复现相同结果，回放结果不应进入新模型性能对比表。
+5. **不同模型应使用各自独立配置与搜索空间**，不应只改 `model.name`（RF/SPE/CNN/MLP 的参数空间不同）。
+6. **调参只使用验证数据**，最终测试集不参与模型/谓词/阈值/超参数选择。
+
+### 13.3 当前版本定位
+
+按验收规格（`CODEING_UPDATE_MD/MPM_CODE_OPTIMIZATION_AND_ACCEPTANCE_SPEC.md`）与复现评审（`POST_REFACTOR_REVIEW.md`），本版本为**局部工程修复版 / experimental development build**：已完成 P0（无泄漏预处理、模式能力边界、评分语义、验证器防假阳性、空间验证、CRS/ROI/GeoTIFF 硬约束）与 P1（复现工件、MLP/Predicate/LUSI 链路）的主要修复，但尚未达到“二维研究就绪（research_ready）”。遗留待办详见 `POST_REFACTOR_REVIEW.md` 的 backlog。
+
+---
+
+## 参考依据
+
+- Time-Series-Library（统一入口与脚本化实验组织）：https://github.com/thuml/Time-Series-Library
+- TSIL（单次训练/搜索/多种子/谓词不变量）：https://github.com/Supporon/TSIL
+- scikit-learn 数据泄漏与 Pipeline：https://scikit-learn.org/stable/common_pitfalls.html
+- scikit-learn 嵌套交叉验证：https://scikit-learn.org/stable/auto_examples/model_selection/plot_nested_cross_validation_iris.html
+- scikit-learn StratifiedGroupKFold：https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.StratifiedGroupKFold.html
+- scikit-learn 概率校准：https://scikit-learn.org/stable/modules/calibration.html
+- MPM 空间 CV、PU 数据特点及 prediction/success-rate 指标：https://link.springer.com/article/10.1007/s10618-018-00607-x
+- imbalanced-ensemble（SPE 参考实现）：https://imbalanced-ensemble.readthedocs.io/en/stable/

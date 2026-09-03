@@ -40,7 +40,7 @@ src/
 ├── predicates/            # 谓词/约束入口
 ├── validation/            # holdout / CV / metrics
 ├── tuning/                # none / bayes 等调参策略
-├── data/                  # 数据集、标签、研究单元
+├── data/                  # 数据集、研究变量（研究单元/采样器/标签/权重，注册化）
 └── features/              # 保留的预处理与 phase-1 兼容入口
 ```
 
@@ -48,7 +48,7 @@ src/
 
 ### Task
 
-`target_area_prediction` 已注册；研究单元构建、未标注样本、预测网格和预测输出由 Task 负责。
+`target_area_prediction` 已注册；研究单元、未标注样本、预测网格和预测输出由 Task 通过注册表调用。研究变量（`RESEARCH_UNIT_REGISTRY`、`BACKGROUND_SAMPLER_REGISTRY`、`LABEL_STRATEGY_REGISTRY`、`WEIGHT_STRATEGY_REGISTRY`）已取代硬编码枚举，Task 不再直接 import 模块级研究单元/标签函数。
 
 `deep_edge_prediction` 已注册为能力占位，但会明确报错。原因是当前仓库没有 3D/voxel 研究单元、钻孔/深度标签、3D 特征算子和输出契约，不能用二维逻辑伪装支持。
 
@@ -86,7 +86,7 @@ RF 通过 `MODEL_REGISTRY` 选择。`Experiment` 不再调用 `train_rf()`。
 - Knowledge Provider：产生知识工件；
 - Predicate：消费训练数据和知识上下文，产生约束或训练数据变换。
 
-当前只有 `empty` knowledge provider 和 `identity` predicate，用于验证接口，不宣称已经实现地质谓词。
+当前内置 `empty`（接口占位）和 `spatial_extent`（从研究单元坐标提取研究区域空间范围）两个 knowledge provider，以及 `all_ones`/`spatial_box`/`spatial_distance`/`combined` 四个 constraint 谓词。`spatial_box` 会在 `auto_center`/`auto_side` 时优先消费 `spatial_extent` 知识，回退到从数据重新估计。
 
 ### Validation / Metric
 

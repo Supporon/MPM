@@ -9,7 +9,11 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 
-from ..data.research_units import build_positive_units, build_prediction_grid, sample_unlabeled_units
+from ..data.registries import (
+    BACKGROUND_SAMPLER_REGISTRY,
+    LABEL_STRATEGY_REGISTRY,
+    RESEARCH_UNIT_REGISTRY,
+)
 from .registry import TASK_REGISTRY
 
 
@@ -79,17 +83,22 @@ class TargetAreaPredictionTask:
                 )
 
     def build_positive_units(self, dataset_config, research_unit_config, label_config) -> pd.DataFrame:
-        return build_positive_units(dataset_config["occurrence"], label_config)
+        unit_builder = RESEARCH_UNIT_REGISTRY.create(research_unit_config["type"], {})
+        return unit_builder.build_positive_units(dataset_config["occurrence"], label_config)
 
     def build_unlabeled_units(
         self, dataset_config, research_unit_config, label_config, count: int, seed: int | None = None
     ) -> pd.DataFrame:
-        return sample_unlabeled_units(
-            dataset_config["training_boundary"], count, label_config, seed=seed
+        sampler = BACKGROUND_SAMPLER_REGISTRY.create(research_unit_config["train_unlabeled"], {})
+        points = sampler.sample(dataset_config["training_boundary"], count, seed=seed)
+        label_strategy = LABEL_STRATEGY_REGISTRY.create(
+            label_config.get("strategy", "positive_unlabeled_as_zero"), {}
         )
+        return label_strategy.apply_unlabeled(points, label_config)
 
     def build_prediction_units(self, dataset_config, research_unit_config):
-        units, mask = build_prediction_grid(
+        unit_builder = RESEARCH_UNIT_REGISTRY.create(research_unit_config["type"], {})
+        units, mask = unit_builder.build_prediction_units(
             dataset_config["boundary"], float(research_unit_config["prediction_grid_size"])
         )
         return units, pd.DataFrame(mask)

@@ -10,6 +10,10 @@ def load_builtin_components() -> None:
     if _LOADED:
         return
     from ..knowledge import providers as _knowledge  # noqa: F401
+    from ..data import label_strategies as _label_strategies  # noqa: F401
+    from ..data import research_unit_builtins as _research_units  # noqa: F401
+    from ..data import samplers as _samplers  # noqa: F401
+    from ..data import weight_strategies as _weight_strategies  # noqa: F401
     from ..models import pu as _pu  # noqa: F401
     from ..models import cnn as _cnn  # noqa: F401
     from ..models import rf as _rf  # noqa: F401

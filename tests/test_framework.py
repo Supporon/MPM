@@ -443,6 +443,63 @@ class FrameworkTests(unittest.TestCase):
         )
         self.assertEqual(transformed.constraints["allowed"], [True, False])
 
+    def test_spatial_extent_knowledge_provider_builds_provenanced_artifacts(self) -> None:
+        """P1-2: spatial_extent 知识提供器产出带 provenance 的空间范围工件。"""
+        units = pd.DataFrame(
+            {"X": [147.0, 148.0, 149.0, 150.0], "Y": [-32.0, -33.0, -34.0, -35.0]}
+        )
+        data = TrainingData(
+            pd.DataFrame({"f": [1.0, 2.0, 3.0, 4.0]}),
+            pd.Series([1, 0, 1, 0]),
+            pd.Series([1.0, 1.0, 1.0, 1.0]),
+            metadata={"units": units},
+        )
+        knowledge = KnowledgePipeline(
+            [ComponentSpec("spatial_extent", {"crs": "EPSG:4283"})]
+        ).build(data, {})
+
+        self.assertIn("spatial_extent", knowledge)
+        extent = knowledge["spatial_extent"]
+        self.assertEqual(extent["bounds"], {"min_x": 147.0, "min_y": -35.0, "max_x": 150.0, "max_y": -32.0})
+        self.assertEqual(extent["center"], {"x": 148.5, "y": -33.5})
+        self.assertEqual(extent["span"], {"x": 3.0, "y": 3.0})
+        self.assertEqual(extent["n_units"], 4)
+        self.assertEqual(extent["source"], "research_unit_metadata")
+        self.assertEqual(extent["crs"], "EPSG:4283")
+
+    def test_spatial_extent_knowledge_returns_empty_without_coordinates(self) -> None:
+        """无坐标来源时 spatial_extent 返回空工件（消费方回退）。"""
+        data = TrainingData(
+            pd.DataFrame({"f": [1.0, 2.0]}),
+            pd.Series([1, 0]),
+            pd.Series([1.0, 1.0]),
+        )
+        knowledge = KnowledgePipeline([ComponentSpec("spatial_extent")]).build(data, {})
+        self.assertEqual(knowledge["spatial_extent"], {})
+
+    def test_spatial_box_consumes_spatial_extent_knowledge(self) -> None:
+        """P1-2: spatial_box 谓词优先消费 spatial_extent 知识而非重新估计。"""
+        units = pd.DataFrame(
+            {"X": [147.0, 148.0, 149.0, 150.0], "Y": [-32.0, -33.0, -34.0, -35.0]}
+        )
+        data = TrainingData(
+            pd.DataFrame({"f": [1.0, 2.0, 3.0, 4.0]}),
+            pd.Series([1, 0, 1, 0]),
+            pd.Series([1.0, 1.0, 1.0, 1.0]),
+            metadata={"units": units},
+        )
+        knowledge = KnowledgePipeline([ComponentSpec("spatial_extent")]).build(data, {})
+        result = PredicatePipeline([ComponentSpec("spatial_box")]).apply(
+            data, {"knowledge": knowledge}
+        )
+        meta = result.metadata["spatial_box"]
+        self.assertAlmostEqual(meta["center_x"], 148.5)
+        self.assertAlmostEqual(meta["center_y"], -33.5)
+        self.assertAlmostEqual(meta["side_length"], 1.5)
+        # φ 向量：中心在 (148.5, -33.5)，边长 1.5 → 选框 [147.75, 149.25] × [-34.25, -32.75]
+        expected = np.array([0.0, 1.0, 1.0, 0.0], dtype=np.float32)
+        np.testing.assert_array_equal(result.constraints["phi_vector"], expected)
+
     def test_weighted_confusion_matrix_uses_sample_weight(self) -> None:
         class FixedModel:
             def predict(self, features):
@@ -1014,6 +1071,99 @@ class FrameworkTests(unittest.TestCase):
             self.assertGreater(len(grid), 0)
             # 网格覆盖整个并集边界（含第二个 box）
             self.assertGreater(grid["X"].max(), 5)
+
+    def test_research_variable_registries_are_populated(self) -> None:
+        """P1-1: 研究变量注册表由内置实现填充，取代硬编码枚举。"""
+        from src.data.registries import (
+            BACKGROUND_SAMPLER_REGISTRY,
+            LABEL_STRATEGY_REGISTRY,
+            RESEARCH_UNIT_REGISTRY,
+            WEIGHT_STRATEGY_REGISTRY,
+        )
+
+        self.assertEqual(RESEARCH_UNIT_REGISTRY.names(), ("point_local_environment",))
+        self.assertEqual(BACKGROUND_SAMPLER_REGISTRY.names(), ("random_points_in_nsw_boundary",))
+        self.assertEqual(LABEL_STRATEGY_REGISTRY.names(), ("positive_unlabeled_as_zero",))
+        self.assertEqual(WEIGHT_STRATEGY_REGISTRY.names(), ("size_code", "uniform"))
+
+    def test_weight_strategy_size_code_maps_attributes(self) -> None:
+        """P1-1: size_code 权重策略映射 SIZE_CODE 到配置权重。"""
+        from src.data.registries import WEIGHT_STRATEGY_REGISTRY
+
+        attributes = pd.DataFrame({"SIZE_CODE": ["VLG", "MED", "SML"]})
+        weights = {"VLG": 0.5, "LGE": 0.4, "MED": 0.3, "SML": 0.2, "OCC": 0.1}
+        strategy = WEIGHT_STRATEGY_REGISTRY.create("size_code", {})
+        result = strategy.compute(attributes, weights)
+        self.assertEqual(result.tolist(), [0.5, 0.3, 0.2])
+
+    def test_weight_strategy_size_code_rejects_missing_code(self) -> None:
+        """P1-1: size_code 权重策略对未配置的 SIZE_CODE 明确失败。"""
+        from src.data.registries import WEIGHT_STRATEGY_REGISTRY
+
+        attributes = pd.DataFrame({"SIZE_CODE": ["VLG", "UNKNOWN"]})
+        weights = {"VLG": 0.5}
+        strategy = WEIGHT_STRATEGY_REGISTRY.create("size_code", {})
+        with self.assertRaisesRegex(ValueError, "SIZE_CODE"):
+            strategy.compute(attributes, weights)
+
+    def test_label_strategy_positive_unlabeled_as_zero(self) -> None:
+        """P1-1: PU 标签策略编码正样本与未标注样本。"""
+        from src.data.registries import LABEL_STRATEGY_REGISTRY
+
+        label_config = {
+            "strategy": "positive_unlabeled_as_zero",
+            "positive_value": 1,
+            "unlabeled_value": 0,
+            "sample_weight": {"VLG": 0.5, "LGE": 0.4, "MED": 0.3, "SML": 0.2, "OCC": 0.1, "unlabeled": 0.5},
+        }
+        strategy = LABEL_STRATEGY_REGISTRY.create("positive_unlabeled_as_zero", {})
+
+        occurrences = pd.DataFrame({"SIZE_CODE": ["VLG", "MED"]})
+        positive = strategy.apply_positive(occurrences, label_config)
+        self.assertEqual(positive["label"].tolist(), [1, 1])
+        self.assertEqual(positive["sample_weight"].tolist(), [0.5, 0.3])
+
+        points = pd.DataFrame({"X": [1.0, 2.0], "Y": [3.0, 4.0]})
+        unlabeled = strategy.apply_unlabeled(points, label_config)
+        self.assertEqual(unlabeled["label"].tolist(), [0, 0])
+        self.assertEqual(unlabeled["sample_weight"].tolist(), [0.5, 0.5])
+
+    def test_task_builds_units_via_registry(self) -> None:
+        """P1-1: Task 通过注册表构建研究单元，而非直接 import 模块函数。"""
+        try:
+            import geopandas as gpd
+            from shapely.geometry import box
+        except ImportError:  # pragma: no cover
+            self.skipTest("geopandas/shapely not installed")
+
+        label_config = {
+            "strategy": "positive_unlabeled_as_zero",
+            "positive_value": 1,
+            "unlabeled_value": 0,
+            "sample_weight": {"VLG": 0.5, "LGE": 0.4, "MED": 0.3, "SML": 0.2, "OCC": 0.1, "unlabeled": 0.5},
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            boundary = gpd.GeoDataFrame(geometry=[box(0, 0, 10, 10)], crs="EPSG:3857")
+            boundary_path = root / "boundary.shp"
+            boundary.to_file(boundary_path)
+
+            research_unit_config = {
+                "type": "point_local_environment",
+                "train_unlabeled": "random_points_in_nsw_boundary",
+                "prediction_grid_size": 2.0,
+            }
+            dataset_config = {"training_boundary": str(boundary_path), "boundary": str(boundary_path)}
+
+            task = TargetAreaPredictionTask({}, {"score_type": "probability", "normalization": "none", "export_geotiff": False})
+            unlabeled = task.build_unlabeled_units(
+                dataset_config, research_unit_config, label_config, count=10, seed=42
+            )
+            self.assertEqual(len(unlabeled), 10)
+            self.assertTrue(((unlabeled["X"] >= 0) & (unlabeled["X"] <= 10)).all())
+
+            units, mask = task.build_prediction_units(dataset_config, research_unit_config)
+            self.assertGreater(len(units), 0)
 
     def test_score_type_contract_rejects_minmax_probability(self) -> None:
         """P0-5: probability/raw_score + minmax 是非法组合，验证失败。"""

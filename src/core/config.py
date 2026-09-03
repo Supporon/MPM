@@ -90,12 +90,9 @@ DEFAULTS: dict[str, Any] = {
 # 顶层允许的配置节（严格 schema 用于拒绝未知/拼写错误的顶层键）。
 _KNOWN_SECTIONS = set(DEFAULTS) | {"dataset"}
 
-# 已实现的研究变量枚举。注册化（P1-1）完成后这些将被注册表取代，
-# 目前先用于拒绝 "does_not_exist" 一类的无效值，避免静默忽略。
-_KNOWN_RESEARCH_UNIT_TYPES = {"point_local_environment"}
-_KNOWN_TRAIN_POSITIVE = {"occurrence_points"}
-_KNOWN_TRAIN_UNLABELED = {"random_points_in_nsw_boundary"}
-_KNOWN_LABEL_STRATEGIES = {"positive_unlabeled_as_zero"}
+# 已实现的研究变量由注册表驱动。这里不再维护硬编码枚举；
+# _validate_strict_schema 会从注册表动态读取可用项，拒绝 "does_not_exist" 一类的无效值。
+
 
 
 def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
@@ -463,26 +460,34 @@ def _validate_strict_schema(config: Mapping[str, Any]) -> None:
         "label",
     )
 
+    from ..data.registries import (
+        BACKGROUND_SAMPLER_REGISTRY,
+        LABEL_STRATEGY_REGISTRY,
+        RESEARCH_UNIT_REGISTRY,
+    )
+
     research_unit = config["research_unit"]
-    if research_unit["type"] not in _KNOWN_RESEARCH_UNIT_TYPES:
+    if research_unit["type"] not in RESEARCH_UNIT_REGISTRY.names():
         raise ConfigError(
             f"research_unit.type={research_unit['type']!r} is not implemented; "
-            f"available: {sorted(_KNOWN_RESEARCH_UNIT_TYPES)}"
+            f"available: {sorted(RESEARCH_UNIT_REGISTRY.names())}"
         )
-    if research_unit["train_positive"] not in _KNOWN_TRAIN_POSITIVE:
+    if research_unit["train_positive"] not in {"occurrence_points"}:
+        # train_positive 声明正样本来源语义，当前仅有 occurrence_points 实现，
+        # 由研究单元构建器内部消费。未来扩展为独立注册表。
         raise ConfigError(
             f"research_unit.train_positive={research_unit['train_positive']!r} is not implemented; "
-            f"available: {sorted(_KNOWN_TRAIN_POSITIVE)}"
+            f"available: ['occurrence_points']"
         )
-    if research_unit["train_unlabeled"] not in _KNOWN_TRAIN_UNLABELED:
+    if research_unit["train_unlabeled"] not in BACKGROUND_SAMPLER_REGISTRY.names():
         raise ConfigError(
             f"research_unit.train_unlabeled={research_unit['train_unlabeled']!r} is not implemented; "
-            f"available: {sorted(_KNOWN_TRAIN_UNLABELED)}"
+            f"available: {sorted(BACKGROUND_SAMPLER_REGISTRY.names())}"
         )
-    if config["label"]["strategy"] not in _KNOWN_LABEL_STRATEGIES:
+    if config["label"]["strategy"] not in LABEL_STRATEGY_REGISTRY.names():
         raise ConfigError(
             f"label.strategy={config['label']['strategy']!r} is not implemented; "
-            f"available: {sorted(_KNOWN_LABEL_STRATEGIES)}"
+            f"available: {sorted(LABEL_STRATEGY_REGISTRY.names())}"
         )
 
 

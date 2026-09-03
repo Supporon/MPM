@@ -102,3 +102,29 @@ class PredicateProtocol(Protocol):
 class KnowledgeProviderProtocol(Protocol):
     name: str
     def build(self, data: TrainingData, context: Mapping[str, Any]) -> Mapping[str, Any]: ...
+
+
+class ResearchUnitProtocol(Protocol):
+    """研究单元构建器：将原始 GIS 数据转换为带 X/Y 坐标的点单元。"""
+    name: str
+    def build_positive_units(self, dataset_config, research_unit_config, label_config) -> pd.DataFrame: ...
+    def build_prediction_units(self, dataset_config, research_unit_config) -> tuple[pd.DataFrame, pd.DataFrame]: ...
+
+
+class BackgroundSamplerProtocol(Protocol):
+    """未标注/背景采样器：在边界内生成未标注点。"""
+    name: str
+    def sample(self, boundary_path: str, count: int, seed: int | None = None) -> pd.DataFrame: ...
+
+
+class LabelStrategyProtocol(Protocol):
+    """标签策略：将原始观测编码为模型训练目标与样本权重。"""
+    name: str
+    def apply_positive(self, occurrences: pd.DataFrame, label_config: Mapping[str, Any]) -> pd.DataFrame: ...
+    def apply_unlabeled(self, points: pd.DataFrame, label_config: Mapping[str, Any]) -> pd.DataFrame: ...
+
+
+class WeightStrategyProtocol(Protocol):
+    """样本权重策略：将属性（如 SIZE_CODE）映射为样本权重。"""
+    name: str
+    def compute(self, attributes: pd.DataFrame, weight_config: Mapping[str, Any]) -> pd.Series: ...
