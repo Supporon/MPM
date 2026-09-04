@@ -1,0 +1,50 @@
+experiment:
+  name: nsw_cnn2d
+  seed: 42
+  output_dir: outputs/nsw_cnn2d
+  execution_mode: train_from_archive_features
+  variant: baseline
+task:
+  name: target_area_prediction
+  region: nsw
+dataset:
+  root: ../EarthByte-MPM_Lachlan_Porphyry
+  archive_dir: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Outputs_Cu_NSW_v1.6
+model:
+  name: cnn2d
+  params:
+    patch: 15
+    n_epochs: 150
+    batch_size: 64
+    learning_rate: 0.001
+    weight_decay: 0.0001
+    dropout: 0.3
+    device: cpu
+validation:
+  holdout:
+    name: random_holdout
+    params:
+      test_size: 0.25
+  cross_validation:
+    name: stratified_kfold
+    params:
+      n_splits: 10
+      shuffle: false
+  metrics:
+  - accuracy
+  - precision
+  - recall
+  - f1
+  - roc_auc
+  - average_precision
+  - balanced_accuracy
+  - mcc
+  - confusion_matrix
+  primary_metric: f1
+tuning:
+  name: none
+  params: {}
+prediction:
+  score_type: relative_score
+  normalization: minmax
+  export_geotiff: false

@@ -177,6 +177,10 @@ class TorchTrainingLoop:
                     batch_X, batch_y, batch_w = batch
                     batch_phi = None
 
+                if batch_X.shape[0] == 1:
+                    # BatchNorm 需要 >1 个样本才能计算批统计；跳过最后一个单样本 batch
+                    continue
+
                 batch_X = batch_X.to(config.device)
                 batch_y = batch_y.to(config.device)
                 batch_w = batch_w.to(config.device)

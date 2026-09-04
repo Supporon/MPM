@@ -5,6 +5,7 @@ from __future__ import annotations
 import pickle
 import shutil
 import time
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -233,10 +234,30 @@ class Experiment:
 
         if self.mode == "train_from_archive_features":
             assert self.dataset is not None
-            training = self._training_from_frame(self.dataset.train_split, self.dataset.feature_columns)
-            self._evaluation_data = self._training_from_frame(
-                self.dataset.test_split, self.dataset.feature_columns
+            grid_model = bool(getattr(self.model_adapter, "grid_model", False))
+            # 空间谓词需要坐标；grid 模型需要坐标 + 网格。仅当需要时重建，避免额外开销
+            units = self.dataset.point_units() if (self.spec.predicates or grid_model) else (None, None)
+            training = self._training_from_frame(
+                self.dataset.train_split, self.dataset.feature_columns, units=units[0]
             )
+            self._evaluation_data = self._training_from_frame(
+                self.dataset.test_split, self.dataset.feature_columns, units=units[1]
+            )
+            if grid_model:
+                from ..data.archive_coords import build_grid, snap_cells
+
+                grid, inside, x_axis, y_axis = build_grid(self.values["dataset"]["archive_dir"])
+                train_cells = snap_cells(units[0], x_axis, y_axis)
+                self._grid_test_cells = snap_cells(units[1], x_axis, y_axis)
+                training = replace(
+                    training,
+                    metadata={
+                        **training.metadata,
+                        "grid": grid,
+                        "inside": inside,
+                        "train_cells": train_cells,
+                    },
+                )
             self.component_metadata["training_source"] = "archive:Xy_rf_train.csv"
             self.component_metadata["evaluation_source"] = "archive:Xy_rf_test.csv"
             self.component_metadata["holdout_execution"] = "precomputed_in_archive"
@@ -371,6 +392,8 @@ class Experiment:
                 raise RuntimeError("Model must be trained before evaluation")
             evaluation = self._evaluation_data
             self._log.info("Evaluating model on %d test samples", len(evaluation.labels))
+            if getattr(self.model_adapter, "grid_model", False):
+                self.model.set_predict_cells(self._grid_test_cells)
             self.metrics = evaluate_classifier(
                 self.model,
                 evaluation.features,
@@ -418,6 +441,8 @@ class Experiment:
             target_mask = self._raw_target_mask
 
         self._log.info("Generating predictions for %d target points", len(target_features))
+        if getattr(self.model_adapter, "grid_model", False):
+            self.model.set_predict_cells(None)  # 预测阶段：在整幅有效单元上滑动
         predictions = self.task.predict(self.model, target_features, target_coords)
         self.output_files.extend(
             self.task.export_predictions(predictions, target_mask, prediction_dir)

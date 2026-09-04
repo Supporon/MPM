@@ -66,6 +66,14 @@ def main() -> int:
             log.info("Config validation passed")
             return 0
         manifest = Experiment(config).run()
+        # 运行完成后自动绘图（绘图失败不影响实验本身）
+        try:
+            from src.plotting.plot import plot_run
+            out = plot_run(config.output_dir)
+            if out is not None:
+                log.info("Plot written to %s", out)
+        except Exception as error:  # noqa: BLE001 - 绘图是尽力而为
+            log.warning("Automatic plotting failed (experiment results unaffected): %s", error)
     except (ConfigError, FileNotFoundError, RuntimeError, ValueError, NotImplementedError) as error:
         log.error("Experiment failed: %s", error)
         parser.error(str(error))

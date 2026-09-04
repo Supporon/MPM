@@ -1,0 +1,74 @@
+experiment:
+  name: nsw_mlp_bayes
+  seed: 42
+  output_dir: outputs/nsw_mlp_bayes
+  execution_mode: train_from_archive_features
+  variant: baseline
+task:
+  name: target_area_prediction
+  region: nsw
+dataset:
+  root: ../EarthByte-MPM_Lachlan_Porphyry
+  archive_dir: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Outputs_Cu_NSW_v1.6
+model:
+  name: mlp
+  params:
+    hidden_layers: [64, 32]
+    n_epochs: 100
+    batch_size: 64
+    learning_rate: 0.001
+    dropout: 0.3
+    device: cpu
+validation:
+  holdout:
+    name: random_holdout
+    params:
+      test_size: 0.25
+  cross_validation:
+    name: stratified_kfold
+    params:
+      n_splits: 5
+      shuffle: false
+  metrics:
+  - accuracy
+  - precision
+  - recall
+  - f1
+  - roc_auc
+  - average_precision
+  - balanced_accuracy
+  - mcc
+  - confusion_matrix
+  primary_metric: f1
+tuning:
+  name: bayes
+  params:
+    n_iter: 25
+    n_jobs: 1
+    search_space:
+      n_epochs:
+        type: integer
+        low: 50
+        high: 200
+      batch_size:
+        type: integer
+        low: 16
+        high: 128
+      learning_rate:
+        type: real
+        low: 0.0001
+        high: 0.01
+        prior: log-uniform
+      weight_decay:
+        type: real
+        low: 0.000001
+        high: 0.001
+        prior: log-uniform
+      dropout:
+        type: real
+        low: 0.1
+        high: 0.5
+prediction:
+  score_type: relative_score
+  normalization: minmax
+  export_geotiff: false

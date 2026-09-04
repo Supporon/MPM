@@ -68,6 +68,26 @@ class ArchiveDataset:
         if int(inside_flags.sum()) != len(self.target_features):
             raise ValueError("target_mask true-cell count does not match target_features rows")
 
+    def point_units(self) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+        """为训练/测试划分返回逐行坐标（供空间谓词使用）。
+
+        归档特征本身不含坐标；通过 scaler+encoder 重建 549 个源点并逐行匹配。
+        """
+        from .archive_coords import match_rows, reconstruct_archive_points
+
+        try:
+            coords, X_source = reconstruct_archive_points(self.archive_dir)
+        except (FileNotFoundError, ValueError, KeyError) as error:
+            raise ValueError(
+                "spatial predicates require point coordinates, but they could not be "
+                f"reconstructed from the archive: {error}"
+            ) from error
+        train_idx = match_rows(X_source, self.xy_rf_train[self.feature_columns])
+        test_idx = match_rows(X_source, self.xy_rf_test[self.feature_columns])
+        train_coords = coords.iloc[train_idx].reset_index(drop=True)
+        test_coords = coords.iloc[test_idx].reset_index(drop=True)
+        return train_coords, test_coords
+
     def summary(self) -> dict[str, Any]:
         """返回可序列化的归档形状、标签和特征元数据。"""
         return {

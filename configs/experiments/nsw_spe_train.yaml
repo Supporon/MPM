@@ -1,0 +1,47 @@
+experiment:
+  name: nsw_spe_train
+  seed: 42
+  output_dir: outputs/nsw_spe_train
+  execution_mode: train_from_archive_features
+  variant: baseline
+task:
+  name: target_area_prediction
+  region: nsw
+dataset:
+  root: ../EarthByte-MPM_Lachlan_Porphyry
+  archive_dir: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Outputs_Cu_NSW_v1.6
+model:
+  name: spe
+  params:
+    n_estimators: 10
+    k_bins: 5
+    replacement: false
+    base_estimator: decision_tree
+validation:
+  holdout:
+    name: random_holdout
+    params:
+      test_size: 0.25
+  cross_validation:
+    name: stratified_kfold
+    params:
+      n_splits: 10
+      shuffle: false
+  metrics:
+  - accuracy
+  - precision
+  - recall
+  - f1
+  - roc_auc
+  - average_precision
+  - balanced_accuracy
+  - mcc
+  - confusion_matrix
+  primary_metric: f1
+tuning:
+  name: none
+  params: {}
+prediction:
+  score_type: relative_score
+  normalization: minmax
+  export_geotiff: false
