@@ -14,6 +14,7 @@ from ..data.registries import (
     LABEL_STRATEGY_REGISTRY,
     RESEARCH_UNIT_REGISTRY,
 )
+from ..utils.crs import crs_identifier, require_consistent_crs, resolve_crs_identifier
 from .registry import TASK_REGISTRY
 
 
@@ -29,6 +30,38 @@ class TargetAreaPredictionTask:
         self.task_config = dict(task_config)
         self.prediction_config = dict(prediction_config)
         self._normalization_range: tuple[float, float] | None = None
+        # 研究单元 CRS：由 build_positive_units / build_unlabeled_units /
+        # build_prediction_units 逐步记录，跨组件一致性由 _record_crs 校验。
+        self.research_crs = None
+        self._research_crs_id: str | None = None
+        self._unit_area: float | None = None
+
+    @property
+    def normalization_range(self) -> tuple[float, float] | None:
+        """relative_score + minmax 归一化时使用的原始分数范围（min, max）。"""
+        return self._normalization_range
+
+    @property
+    def unit_area(self) -> float | None:
+        """规则预测网格的单元面积（grid_size²）；仅对米制投影 CRS 有意义。"""
+        return self._unit_area
+
+    def _record_crs(self, label: str, crs) -> None:
+        """记录一个研究单元的 CRS，并与已记录 CRS 做一致性校验。"""
+        if crs is None:
+            return
+        ident = crs_identifier(crs)
+        if ident is None:
+            return
+        if self._research_crs_id is not None and self._research_crs_id != ident:
+            raise ValueError(
+                f"CRS mismatch: research units already recorded as "
+                f"{self._research_crs_id}, but {label} is {ident}. Reproject "
+                "inputs to a common CRS before running."
+            )
+        self._research_crs_id = ident
+        if self.research_crs is None:
+            self.research_crs = crs
 
     @staticmethod
     def validate_config(
@@ -37,6 +70,7 @@ class TargetAreaPredictionTask:
         prediction_config,
         dataset_config,
         execution_mode,
+        feature_operators=None,
     ) -> None:
         if research_unit_config["type"] != "point_local_environment":
             raise ValueError(
@@ -60,47 +94,67 @@ class TargetAreaPredictionTask:
         if float(research_unit_config["prediction_grid_size"]) <= 0:
             raise ValueError("target_area_prediction prediction_grid_size must be positive")
         if execution_mode == "raw_gis":
-            required = {
-                "occurrence",
-                "boundary",
-                "training_boundary",
-                "geology",
-                "magnetic",
-                "gravity",
-                "radiometric",
-                "remote_sensing",
-                "elevation",
-                "seismic",
-            }
+            # 研究单元/标签基础输入始终必需。
+            base_required = {"occurrence", "boundary", "training_boundary"}
+            if feature_operators is None:
+                # 未提供算子列表时保守要求整套 NSW 字段（向后兼容直接调用）。
+                required = base_required | {
+                    "geology", "magnetic", "gravity", "radiometric",
+                    "remote_sensing", "elevation", "seismic",
+                }
+                geology_required = {"line_files", "metamorphic_facies", "intrusions", "rock_units"}
+            else:
+                # 依所选算子收紧：只要求被选中算子实际消费的输入字段。
+                from ..operators.features.registry import FEATURE_OPERATOR_REGISTRY
+
+                required = set(base_required)
+                geology_required: set[str] = set()
+                for operator in feature_operators:
+                    cls = FEATURE_OPERATOR_REGISTRY.get(operator["name"])
+                    required.update(getattr(cls, "REQUIRED_DATASET_KEYS", ()))
+                    geology_required.update(getattr(cls, "REQUIRED_GEOLOGY_KEYS", ()))
             missing = sorted(required.difference(dataset_config))
             if missing:
                 raise ValueError(f"target_area_prediction raw_gis dataset is missing: {missing}")
-            geology_required = {"line_files", "metamorphic_facies", "intrusions", "rock_units"}
-            geology_missing = sorted(geology_required.difference(dataset_config["geology"]))
-            if geology_missing:
-                raise ValueError(
-                    f"target_area_prediction raw_gis geology is missing: {geology_missing}"
-                )
+            if geology_required:
+                geology_missing = sorted(geology_required.difference(dataset_config["geology"]))
+                if geology_missing:
+                    raise ValueError(
+                        f"target_area_prediction raw_gis geology is missing: {geology_missing}"
+                    )
 
     def build_positive_units(self, dataset_config, research_unit_config, label_config) -> pd.DataFrame:
-        unit_builder = RESEARCH_UNIT_REGISTRY.create(research_unit_config["type"], {})
-        return unit_builder.build_positive_units(dataset_config["occurrence"], label_config)
+        unit_builder = RESEARCH_UNIT_REGISTRY.create(
+            research_unit_config["type"], research_unit_config.get("params", {})
+        )
+        units = unit_builder.build_positive_units(dataset_config["occurrence"], label_config)
+        self._record_crs("occurrence", units.attrs.get("crs"))
+        return units
 
     def build_unlabeled_units(
         self, dataset_config, research_unit_config, label_config, count: int, seed: int | None = None
     ) -> pd.DataFrame:
-        sampler = BACKGROUND_SAMPLER_REGISTRY.create(research_unit_config["train_unlabeled"], {})
+        sampler = BACKGROUND_SAMPLER_REGISTRY.create(
+            research_unit_config["train_unlabeled"], research_unit_config.get("params", {})
+        )
         points = sampler.sample(dataset_config["training_boundary"], count, seed=seed)
+        self._record_crs("training_boundary", points.attrs.get("crs"))
         label_strategy = LABEL_STRATEGY_REGISTRY.create(
-            label_config.get("strategy", "positive_unlabeled_as_zero"), {}
+            label_config.get("strategy", "positive_unlabeled_as_zero"),
+            label_config.get("params", {}),
         )
         return label_strategy.apply_unlabeled(points, label_config)
 
     def build_prediction_units(self, dataset_config, research_unit_config):
-        unit_builder = RESEARCH_UNIT_REGISTRY.create(research_unit_config["type"], {})
+        unit_builder = RESEARCH_UNIT_REGISTRY.create(
+            research_unit_config["type"], research_unit_config.get("params", {})
+        )
         units, mask = unit_builder.build_prediction_units(
             dataset_config["boundary"], float(research_unit_config["prediction_grid_size"])
         )
+        self._record_crs("boundary", units.attrs.get("crs"))
+        # 记录规则网格的单元面积，供 MPM 面积捕获指标与 provenance 使用。
+        self._unit_area = units.attrs.get("unit_area")
         return units, pd.DataFrame(mask)
 
     @staticmethod
@@ -139,6 +193,9 @@ class TargetAreaPredictionTask:
         - ``raw_score``: 模型 ``decision_function`` 原始决策分数，列名 ``raw_score``
         - ``relative_score``: 相对分数；``normalization=minmax`` 时做 MinMax 并记录范围，
           列名 ``relative_score``
+
+        每行带稳定 ``unit_id``（有效单元在规范网格序中的 0 基索引），供
+        逐样本表关联与跨运行汇总；同一网格定义下该 id 跨运行稳定。
         """
         score_type = self.prediction_config.get("score_type", "probability")
         if score_type not in {"probability", "raw_score", "relative_score"}:
@@ -170,7 +227,12 @@ class TargetAreaPredictionTask:
             raise ValueError(f"Unsupported target score normalization: {normalization!r}")
 
         return pd.DataFrame(
-            {"X": target_coords["X"].to_numpy(), "Y": target_coords["Y"].to_numpy(), score_col: scores}
+            {
+                "unit_id": np.arange(len(scores)),
+                "X": target_coords["X"].to_numpy(),
+                "Y": target_coords["Y"].to_numpy(),
+                score_col: scores,
+            }
         )
 
     @staticmethod
@@ -227,6 +289,19 @@ class TargetAreaPredictionTask:
             srs.ImportFromEPSG(target_crs)
         else:
             srs.ImportFromWkt(str(target_crs))
+
+        # 导出 CRS 必须与已记录的研究单元 CRS 一致；不一致说明坐标被错误
+        # 标注（或输入未统一投影）。framework 不做隐式重投影。
+        if self._research_crs_id is not None:
+            target_id = resolve_crs_identifier(target_crs)
+            if target_id != self._research_crs_id:
+                raise ValueError(
+                    f"prediction.target_crs ({target_id}) does not match the "
+                    f"research unit CRS ({self._research_crs_id}). The framework "
+                    "does not reproject on export; set target_crs to the actual "
+                    "coordinate CRS or reproject the input data explicitly."
+                )
+
         dataset.SetProjection(srs.ExportToWkt())
         band = dataset.GetRasterBand(1)
         band.SetNoDataValue(-9999.0)

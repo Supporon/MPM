@@ -13,6 +13,7 @@ NaN 行，正是这 5 行在后续被 dropna 丢弃；据此从 277 个背景坐
 from __future__ import annotations
 
 import pickle
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -72,12 +73,49 @@ def reconstruct_archive_points(archive_dir: Path) -> tuple[pd.DataFrame, np.ndar
     return coords, X
 
 
-def match_rows(X_source: np.ndarray, frame: pd.DataFrame) -> np.ndarray:
-    """把 frame 每一行（138 维特征）匹配到 X_source 的行号（最近邻）。"""
+def match_rows(
+    X_source: np.ndarray,
+    frame: pd.DataFrame,
+    *,
+    max_error: float = 1e-3,
+    require_unique: bool = True,
+) -> np.ndarray:
+    """把 frame 每一行（特征）匹配到 X_source 的行号（最近邻）。
+
+    Args:
+        X_source: shape ``(M, C)`` 的源特征矩阵。
+        frame: shape ``(N, C)`` 的待匹配特征（列序须与 ``X_source`` 一致）。
+        max_error: 允许的最大切比雪夫误差。重建特征与归档特征在浮点精度内
+            应完全一致（实测 ~1e-15）；超过阈值说明特征 schema 不匹配。
+        require_unique: True 时，若某行有多个源行落在容差内（歧义），报错。
+
+    Returns:
+        shape ``(N,)`` 的整数行号，``frame`` 每行对应 ``X_source`` 的最近邻。
+
+    Raises:
+        ValueError: 最近邻误差超过 ``max_error``，或存在歧义匹配。
+    """
     idx = np.empty(len(frame), dtype=int)
     for i, row in enumerate(frame.to_numpy(dtype=float)):
         diff = np.abs(X_source - row).max(axis=1)
-        idx[i] = int(np.argmin(diff))
+        nearest = int(np.argmin(diff))
+        error = float(diff[nearest])
+        if error > max_error:
+            raise ValueError(
+                f"archive coordinate match failed at row {i}: nearest match has "
+                f"max abs error {error:.3e} > {max_error:.3e}. The reconstructed "
+                "feature schema likely does not match the archive features."
+            )
+        if require_unique:
+            within = np.flatnonzero(diff <= max_error)
+            if len(within) > 1:
+                raise ValueError(
+                    f"archive coordinate match ambiguous at row {i}: {len(within)} "
+                    f"source rows within tolerance (error {error:.3e} <= "
+                    f"{max_error:.3e}). Refine the reconstruction or relax "
+                    "max_error/require_unique."
+                )
+        idx[i] = nearest
     return idx
 
 
@@ -100,7 +138,30 @@ def build_grid(archive_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, n
 
 
 def snap_cells(coords: pd.DataFrame, x_axis: np.ndarray, y_axis: np.ndarray) -> np.ndarray:
-    """把坐标点吸附到最近格网单元，返回 (N, 2) 的 (row, col)。"""
-    c = np.argmin(np.abs(x_axis[None, :] - coords["X"].to_numpy(dtype=float)[:, None]), axis=1)
-    r = np.argmin(np.abs(y_axis[None, :] - coords["Y"].to_numpy(dtype=float)[:, None]), axis=1)
+    """把坐标点吸附到最近格网单元，返回 (N, 2) 的 (row, col)。
+
+    坐标落在格网范围之外（超过半个格网间距）时发出警告：训练点可能覆盖比
+    目标格网更大的区域（如整个州域 vs 靶区），此时吸附到边缘单元是既有
+    行为；警告用于提示坐标 CRS 或格网范围是否与预期一致，而非静默忽略。
+    """
+    x = coords["X"].to_numpy(dtype=float)
+    y = coords["Y"].to_numpy(dtype=float)
+    x_step = float(np.diff(x_axis).min()) if len(x_axis) > 1 else np.inf
+    y_step = float(np.diff(y_axis).min()) if len(y_axis) > 1 else np.inf
+    x_lo = float(x_axis.min()) - x_step / 2
+    x_hi = float(x_axis.max()) + x_step / 2
+    y_lo = float(y_axis.min()) - y_step / 2
+    y_hi = float(y_axis.max()) + y_step / 2
+    outside = int(((x < x_lo) | (x > x_hi) | (y < y_lo) | (y > y_hi)).sum())
+    if outside:
+        warnings.warn(
+            f"snap_cells: {outside}/{len(coords)} coordinate(s) fall outside the "
+            f"grid extent (X∈[{x_lo:.3g}, {x_hi:.3g}], Y∈[{y_lo:.3g}, {y_hi:.3g}]). "
+            "Verify the coordinate CRS matches the grid axes; points are snapped "
+            "to the nearest edge cell.",
+            UserWarning,
+            stacklevel=2,
+        )
+    c = np.argmin(np.abs(x_axis[None, :] - x[:, None]), axis=1)
+    r = np.argmin(np.abs(y_axis[None, :] - y[:, None]), axis=1)
     return np.column_stack([r, c])

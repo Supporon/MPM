@@ -38,12 +38,15 @@ DEFAULTS: dict[str, Any] = {
     "task": {"name": "target_area_prediction", "region": "unknown", "params": {}},
     "research_unit": {
         "type": "point_local_environment",
+        "params": {},
         "train_positive": "occurrence_points",
         "train_unlabeled": "random_points_in_nsw_boundary",
         "prediction_grid_size": 0.1,
     },
     "label": {
         "strategy": "positive_unlabeled_as_zero",
+        "params": {},
+        "weight_strategy": {"name": "size_code", "params": {}},
         "positive_value": 1,
         "unlabeled_value": 0,
         "sample_weight": {
@@ -163,6 +166,9 @@ def apply_cli_overrides(config: ExperimentConfig, raw_overrides: list[str]) -> E
 
     返回一个新的 ``ExperimentConfig``，原配置不受影响。
     所有覆盖值会记录在 ``config_resolved.yaml`` 中。
+
+    覆盖后的路径会像 ``load_config`` 一样相对于配置文件的项目根目录重新解析，
+    并对被覆盖的标量 ``dataset`` 路径做存在性校验，避免静默指向不存在的输入。
     """
     if not raw_overrides:
         return config
@@ -177,8 +183,29 @@ def apply_cli_overrides(config: ExperimentConfig, raw_overrides: list[str]) -> E
         parsed[key] = _coerce_value(value.strip())
     overrides_nested = _dot_to_nested(parsed)
     merged = _deep_merge(copy.deepcopy(config.values), overrides_nested)
+    # CLI 覆盖后重新解析路径（相对 config 根目录），与 load_config 语义一致
+    _resolve_dataset_paths(merged, _config_root(config.source_path))
+    _validate_overridden_paths(merged, list(parsed.keys()))
     validate_config(merged)
     return ExperimentConfig(values=merged, source_path=config.source_path)
+
+
+def _validate_overridden_paths(config: Mapping[str, Any], dotted_keys: list[str]) -> None:
+    """校验被 CLI 覆盖的标量 ``dataset`` 路径存在。
+
+    只覆盖直接以 ``dataset.<key>`` 形式覆盖的标量路径键；``experiment.output_dir``
+    等目标路径（运行期创建）不做存在性要求，嵌套列表/映射亦交由运行时处理。
+    """
+    dataset = config.get("dataset", {})
+    for dotted in dotted_keys:
+        parts = dotted.split(".")
+        if len(parts) != 2 or parts[0] != "dataset" or parts[1] not in _DATASET_PATH_KEYS:
+            continue
+        value = dataset.get(parts[1])
+        if isinstance(value, str) and value and not Path(value).exists():
+            raise ConfigError(
+                f"CLI override 'dataset.{parts[1]}' points to a non-existent path: {value}"
+            )
 
 
 def _legacy_space_to_explicit(space: Mapping[str, Any]) -> dict[str, Any]:
@@ -274,6 +301,27 @@ def _require(mapping: Mapping[str, Any], path: str) -> Any:
     if current in (None, ""):
         raise ConfigError(f"Configuration key cannot be empty: {path}")
     return current
+
+
+def _config_root(source_path: Path) -> Path:
+    """沿用仓库约定：configs/experiments/*.yaml 中的路径相对于项目根目录解析。"""
+    return source_path.parents[2] if len(source_path.parents) >= 3 else source_path.parent
+
+
+# dataset 下按执行模式要求存在/使用的标量路径键（用于 CLI 覆盖后的存在性校验）。
+_DATASET_PATH_KEYS = (
+    "root",
+    "archive_dir",
+    "occurrence",
+    "boundary",
+    "training_boundary",
+    "magnetic",
+    "gravity",
+    "radiometric",
+    "remote_sensing",
+    "elevation",
+    "seismic",
+)
 
 
 def _resolve_path(config_root: Path, value: str) -> str:
@@ -372,6 +420,7 @@ def validate_config(config: Mapping[str, Any]) -> None:
             config["prediction"],
             config["dataset"],
             config["experiment"]["execution_mode"],
+            config["features"].get("operators", []),
         )
         MODEL_REGISTRY.require(config["model"]["name"])
         MODEL_REGISTRY.validate(config["model"]["name"], config["model"].get("params", {}))
@@ -451,12 +500,12 @@ def _validate_strict_schema(config: Mapping[str, Any]) -> None:
     _reject_unknown_keys(config["model"], {"name", "params"}, "model")
     _reject_unknown_keys(
         config["research_unit"],
-        {"type", "train_positive", "train_unlabeled", "prediction_grid_size"},
+        {"type", "params", "train_positive", "train_unlabeled", "prediction_grid_size"},
         "research_unit",
     )
     _reject_unknown_keys(
         config["label"],
-        {"strategy", "positive_value", "unlabeled_value", "sample_weight"},
+        {"strategy", "params", "weight_strategy", "positive_value", "unlabeled_value", "sample_weight"},
         "label",
     )
 
@@ -464,6 +513,7 @@ def _validate_strict_schema(config: Mapping[str, Any]) -> None:
         BACKGROUND_SAMPLER_REGISTRY,
         LABEL_STRATEGY_REGISTRY,
         RESEARCH_UNIT_REGISTRY,
+        WEIGHT_STRATEGY_REGISTRY,
     )
 
     research_unit = config["research_unit"]
@@ -489,11 +539,42 @@ def _validate_strict_schema(config: Mapping[str, Any]) -> None:
             f"label.strategy={config['label']['strategy']!r} is not implemented; "
             f"available: {sorted(LABEL_STRATEGY_REGISTRY.names())}"
         )
+    if not isinstance(research_unit.get("params", {}), Mapping):
+        raise ConfigError("research_unit.params must be a mapping")
+    if not isinstance(config["label"].get("params", {}), Mapping):
+        raise ConfigError("label.params must be a mapping")
+    weight_strategy = config["label"].get("weight_strategy", {})
+    if not isinstance(weight_strategy, Mapping):
+        raise ConfigError("label.weight_strategy must be a mapping with 'name' and 'params'")
+    weight_name = weight_strategy.get("name", "size_code")
+    if weight_name not in WEIGHT_STRATEGY_REGISTRY.names():
+        raise ConfigError(
+            f"label.weight_strategy.name={weight_name!r} is not implemented; "
+            f"available: {sorted(WEIGHT_STRATEGY_REGISTRY.names())}"
+        )
 
 
 def _validate_mode_capabilities(config: Mapping[str, Any]) -> None:
     """按执行模式拒绝不生效的配置（配置必须产生行为）。"""
+    from ..models.registry import MODEL_REGISTRY
+    from ..tuning.registry import TUNER_REGISTRY
+
     mode = config["experiment"]["execution_mode"]
+    grid_model = bool(
+        getattr(MODEL_REGISTRY.get(config["model"]["name"]), "grid_model", False)
+    )
+
+    # grid 模型（cnn2d / label_spreading）需要网格数据（grid/inside/train_cells），
+    # 这些只在 train_from_archive_features 中构建，且无法被 BayesSearchCV 的折
+    # 切片安全折叠。在配置层拒绝，避免形状错误或隐含泄漏。
+    if grid_model:
+        tuner = TUNER_REGISTRY.get(config["tuning"]["name"])
+        if getattr(tuner, "uses_cross_validation", False):
+            raise ConfigError(
+                f"model {config['model']['name']!r} is a grid model and cannot be "
+                f"tuned with CV-based tuner {config['tuning']['name']!r}: grid/inside/"
+                "train_cells metadata cannot be sliced per fold. Use tuning.name=none."
+            )
 
     if mode == "archive_replay":
         if config["tuning"]["name"] != "none":
@@ -540,6 +621,30 @@ def _validate_mode_capabilities(config: Mapping[str, Any]) -> None:
             )
         return
 
+    if mode == "raw_gis":
+        if grid_model:
+            raise ConfigError(
+                f"model {config['model']['name']!r} is a grid model and cannot run "
+                "in raw_gis mode: grid/inside/train_cells are only built from the "
+                "archive in train_from_archive_features mode. Use a point model "
+                "(e.g. rf/mlp/cnn) or train_from_archive_features."
+            )
+        # PUB 标签细化在完整外层训练集拟合后，若再用内层 CV 调参，验证折标签
+        # 会参与 relabel，造成内层评价泄漏（P0-03）。折内隔离只覆盖预处理
+        # scaler；标签细化无法在 BayesSearchCV 的折切片内安全重拟合，故在
+        # 配置层拒绝该组合，而非静默泄漏。
+        if config.get("label_refinement", {}).get("enabled", False):
+            tuner = TUNER_REGISTRY.create(config["tuning"]["name"])
+            if getattr(tuner, "uses_cross_validation", False):
+                raise ConfigError(
+                    "raw_gis mode with label_refinement (PUB) and a CV-based tuner "
+                    f"({config['tuning']['name']}) would fit the label refiner on the "
+                    "full outer training set before inner-CV, leaking validation "
+                    "labels. Use tuning.name=none with label_refinement, or disable "
+                    "label_refinement to enable fold-safe CV tuning."
+                )
+        return
+
 
 def load_config(path: str | Path) -> ExperimentConfig:
     log = get_logger("config")
@@ -554,8 +659,7 @@ def load_config(path: str | Path) -> ExperimentConfig:
     migrated = _migrate_phase1_config(loaded)
     resolved = _deep_merge(DEFAULTS, migrated)
     # 沿用仓库约定：configs/experiments/*.yaml 中的路径相对于项目根目录解析。
-    config_root = source_path.parents[2] if len(source_path.parents) >= 3 else source_path.parent
-    _resolve_dataset_paths(resolved, config_root)
+    _resolve_dataset_paths(resolved, _config_root(source_path))
     validate_config(resolved)
     log.info("Config loaded and validated: experiment=%s, model=%s, mode=%s",
              resolved["experiment"]["name"], resolved["model"]["name"], resolved["experiment"]["execution_mode"])

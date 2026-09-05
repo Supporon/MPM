@@ -87,7 +87,7 @@ python run.py --config configs/experiments/nsw_spe_constrained_allones.yaml
 python -m pytest -q
 ```
 
-> 当前仓库预置的配置全部是 `train_from_archive_features`。没有可直接运行的 `archive_replay` 或 `raw_gis` YAML；这两种模式需用户自行准备配置和输入数据。各 NSW 配置的执行模式、模型、调优方式见 [§2.1](#21-内置实验配置一览)。
+> 仓库预置配置中，22 个 `nsw_*.yaml` 均为 `train_from_archive_features`；另有 3 个 `lachlan_*.yaml` 分别对应 `archive_replay`（`lachlan_rf_baseline.yaml`）、`train_from_archive_features` + bayes（`lachlan_rf_phase2.yaml`）与 `raw_gis`（`lachlan_rf_raw_gis.yaml`，需 GIS 数据与 geopandas/rasterio）。各 NSW 配置的执行模式、模型、调优方式见 [§2.1](#21-内置实验配置一览)。
 
 ### 2.1 内置实验配置一览
 

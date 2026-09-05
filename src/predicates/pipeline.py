@@ -47,50 +47,56 @@ class PredicatePipeline:
     def constraint_predicates(self) -> list:
         return [p for p in self.items if getattr(p, "kind", None) == "constraint"]
 
+    @staticmethod
+    def _check_row_count(predicate, result: TrainingData, expected: int) -> None:
+        if len(result.features) != expected:
+            raise ValueError(
+                f"Predicate '{predicate.name}' changed row count; "
+                "row-changing predicates require an explicit resampling contract"
+            )
+
     def apply(self, data: TrainingData, context: Mapping[str, Any]) -> TrainingData:
         result = data
         # Phase 1: 数据变换谓词（修改标签/权重）
         for predicate in self.data_transform_predicates:
             result = predicate.apply(result, context)
-            if len(result.features) != len(data.features):
-                raise ValueError(
-                    f"Predicate '{predicate.name}' changed row count; "
-                    f"row-changing predicates require an explicit resampling contract"
-                )
+            self._check_row_count(predicate, result, len(data.features))
 
-        # Phase 2: 约束谓词（生成 φ 向量）
         constraint_preds = self.constraint_predicates
-        if len(constraint_preds) <= 1:
-            for predicate in constraint_preds:
-                result = predicate.apply(result, context)
-                if len(result.features) != len(data.features):
-                    raise ValueError(
-                        f"Predicate '{predicate.name}' changed row count; "
-                        f"row-changing predicates require an explicit resampling contract"
-                    )
+        if not constraint_preds:
+            return result
+        if len(constraint_preds) == 1:
+            result = constraint_preds[0].apply(result, context)
+            self._check_row_count(constraint_preds[0], result, len(data.features))
             return result
 
-        # 多个约束谓词：分别应用并收集各自的 φ，避免都写入 phi_vector 时后一个覆盖前一个
-        collected: list[dict] = []
+        # 多个约束谓词必须从同一份（已完成 data_transform 的）基础数据
+        # 独立计算，不能把上一个谓词写入的 phi 载荷带给下一个谓词。
+        base_constraints = {
+            key: value
+            for key, value in result.constraints.items()
+            if key not in {"phi_vector", "phi_vectors"}
+        }
+        base_result = replace(result, constraints=base_constraints)
+        collected: list[dict[str, Any]] = []
+        applied = list(result.metadata.get("predicates_applied", []))
         for predicate in constraint_preds:
-            result = predicate.apply(result, context)
-            if len(result.features) != len(data.features):
-                raise ValueError(
-                    f"Predicate '{predicate.name}' changed row count; "
-                    f"row-changing predicates require an explicit resampling contract"
-                )
-            if "phi_vector" in result.constraints:
+            predicate_result = predicate.apply(base_result, context)
+            self._check_row_count(predicate, predicate_result, len(data.features))
+            if "phi_vector" in predicate_result.constraints:
                 collected.append(
-                    {"name": predicate.name, "vector": result.constraints["phi_vector"]}
+                    {"name": predicate.name, "vector": predicate_result.constraints["phi_vector"]}
                 )
-            elif "phi_vectors" in result.constraints:
-                collected.extend(result.constraints["phi_vectors"])
+            if "phi_vectors" in predicate_result.constraints:
+                collected.extend(predicate_result.constraints["phi_vectors"])
+            applied.append(predicate.name)
 
-        # 清理过程中残留的 phi_vector/phi_vectors，统一为合并后的 phi_vectors
         final_constraints = {
             key: value
             for key, value in result.constraints.items()
             if key not in {"phi_vector", "phi_vectors"}
         }
         final_constraints["phi_vectors"] = collected
-        return replace(result, constraints=final_constraints)
+        final_metadata = dict(result.metadata)
+        final_metadata["predicates_applied"] = applied
+        return replace(result, constraints=final_constraints, metadata=final_metadata)

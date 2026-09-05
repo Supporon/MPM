@@ -63,15 +63,6 @@ EXPERIMENT_MANIFEST = {
                 "prediction_files": ["target_probs.csv", "probability_map.tif"],
             },
         },
-        {
-            "name": "nsw_rf_baseline",
-            "config": "configs/experiments/nsw_rf_baseline.yaml",
-            "description": "NSW RF 基线 — 归档回放",
-            "expected": {
-                "model_file": "model_rf.pkl",
-                "prediction_files": ["target_probs.csv", "probability_map.tif"],
-            },
-        },
     ],
     "train_from_archive_features": [
         {
@@ -111,6 +102,15 @@ EXPERIMENT_MANIFEST = {
                 "predicates": {"enabled": False},
                 "prediction": {"export_geotiff": False},
             },
+            "expected": {
+                "model_file": "model_rf.pkl",
+                "prediction_files": ["target_probs.csv"],
+            },
+        },
+        {
+            "name": "nsw_rf_train",
+            "config": "configs/experiments/nsw_rf_train.yaml",
+            "description": "NSW RF — 从归档特征重新训练（无 PUB，无调参）",
             "expected": {
                 "model_file": "model_rf.pkl",
                 "prediction_files": ["target_probs.csv"],

@@ -117,10 +117,17 @@ class SelfPacedEnsemble(BaseEstimator, ClassifierMixin):
                 f"SelfPacedEnsemble 仅支持二分类任务，当前数据包含 {len(self.classes_)} 个类别: {self.classes_}"
             )
 
-        # 确定少数类与多数类
-        counts = {label: int(np.sum(y == label)) for label in self.classes_}
-        minority_class = min(counts, key=counts.get)  # 样本数较少的类
-        majority_class = max(counts, key=counts.get)  # 样本数较多的类
+        # 确定少数类与多数类。平衡数据时 min/max(dict) 可能返回同一类，
+        # 因此以稳定的 classes_ 顺序打破平局，并显式保存两个不同的类别。
+        counts = np.asarray([np.sum(y == label) for label in self.classes_], dtype=int)
+        minority_pos = int(np.argmin(counts))
+        majority_pos = int(np.argmax(counts))
+        if minority_pos == majority_pos:
+            majority_pos = 1 - minority_pos
+        minority_class = self.classes_[minority_pos]
+        majority_class = self.classes_[majority_pos]
+        self.minority_class_ = minority_class
+        self.majority_class_ = majority_class
 
         # 分离少数类和多数类样本索引
         min_idx = np.where(y == minority_class)[0]
@@ -175,37 +182,60 @@ class SelfPacedEnsemble(BaseEstimator, ClassifierMixin):
                 sort_order = np.argsort(-hardness)
                 sorted_maj_idx = maj_idx[sort_order]
 
-                # 等分为 k_bins 个箱
+                # 使用 array_split，确保样本数小于 k_bins 时不会产生空箱配额丢失。
+                # 每个样本恰好属于一个箱，且箱数最多为 k_bins。
                 n_maj = len(sorted_maj_idx)
-                bin_size = n_maj // self.k_bins
+                bins = [
+                    chunk
+                    for chunk in np.array_split(sorted_maj_idx, min(self.k_bins, n_maj))
+                    if len(chunk)
+                ]
+                n_bins = len(bins)
 
                 # --- 步骤 2d: 计算各箱的采样权重 ---
                 # w_j = 1 / (1 + α * j)，j=0 为最硬箱
                 # α 小时权重均匀，α 大时硬箱（小 j）权重更高
                 bin_weights = np.array(
-                    [1.0 / (1.0 + alpha * j) for j in range(self.k_bins)]
+                    [1.0 / (1.0 + alpha * j) for j in range(n_bins)]
                 )
                 bin_probs = bin_weights / bin_weights.sum()
 
                 # --- 步骤 2e: 按权重从各箱中采样 ---
                 samples_per_bin = rng.multinomial(n_min, bin_probs)
-
                 sampled_indices = []
-                for bin_j in range(self.k_bins):
-                    start = bin_j * bin_size
-                    if bin_j == self.k_bins - 1:
-                        end = n_maj  # 最后一个箱取剩余全部
-                    else:
-                        end = start + bin_size
-                    bin_indices = sorted_maj_idx[start:end]
-                    n_sample = min(samples_per_bin[bin_j], len(bin_indices))
+                for bin_j, bin_indices in enumerate(bins):
+                    n_sample = int(samples_per_bin[bin_j])
+                    if not self.replacement:
+                        n_sample = min(n_sample, len(bin_indices))
                     if n_sample > 0:
                         chosen = rng.choice(
                             bin_indices, size=n_sample, replace=self.replacement
                         )
                         sampled_indices.extend(chosen)
 
-                sampled_maj_idx = np.array(sampled_indices)
+                # 无放回时小箱可能无法满足原 multinomial 配额；从尚未
+                # 选中的多数类补齐，保证每个基学习器仍是平衡子集。
+                remaining = n_min - len(sampled_indices)
+                if remaining > 0:
+                    selected = {int(value) for value in sampled_indices}
+                    available = np.asarray(
+                        [
+                            value
+                            for value in maj_idx
+                            if self.replacement or int(value) not in selected
+                        ],
+                        dtype=int,
+                    )
+                    if len(available) < remaining and not self.replacement:
+                        raise ValueError(
+                            "SPE could not allocate a balanced majority subset; "
+                            f"need {remaining} additional samples, found {len(available)}"
+                        )
+                    sampled_indices.extend(
+                        rng.choice(available, size=remaining, replace=self.replacement)
+                    )
+
+                sampled_maj_idx = np.asarray(sampled_indices, dtype=int)
 
             # --- 步骤 2f: 合并少数类 + 采样多数类，训练基分类器 ---
             train_idx = np.concatenate([min_idx, sampled_maj_idx])
@@ -244,15 +274,21 @@ class SelfPacedEnsemble(BaseEstimator, ClassifierMixin):
         n_maj = X_maj.shape[0]
         probas = np.zeros(n_maj)
         for est in self.estimators_:
-            # 对每个基分类器，取预测为正类（索引 1）的概率
             if hasattr(est, "predict_proba"):
-                proba = est.predict_proba(X_maj)
-                # 正类在多数类场景下位于索引 1
-                probas += proba[:, 1] if proba.shape[1] > 1 else proba[:, 0]
+                proba = np.asarray(est.predict_proba(X_maj), dtype=float)
+                est_classes = np.asarray(getattr(est, "classes_", self.classes_))
+                matching = np.flatnonzero(est_classes == self.minority_class_)
+                if len(matching) == 0:
+                    # 单类基学习器没有 minority 概率；若它只知道 majority，
+                    # 其 minority 概率确定为 0，绝不将单列数组广播到两类。
+                    contribution = np.zeros(n_maj, dtype=float)
+                else:
+                    contribution = proba[:, int(matching[0])]
+                probas += contribution
             else:
-                # 降级：使用 predict + 独热
+                # 降级：使用 predict + 明确的 minority 类别比较
                 pred = est.predict(X_maj)
-                probas += (pred == 1).astype(float)
+                probas += (pred == self.minority_class_).astype(float)
         return probas / len(self.estimators_)
 
     def predict_proba(self, X):
@@ -276,7 +312,18 @@ class SelfPacedEnsemble(BaseEstimator, ClassifierMixin):
         probas = np.zeros((n_samples, n_classes))
 
         for est in self.estimators_:
-            probas += est.predict_proba(X)
+            est_proba = np.asarray(est.predict_proba(X), dtype=float)
+            est_classes = np.asarray(getattr(est, "classes_", self.classes_))
+            aligned = np.zeros((n_samples, n_classes), dtype=float)
+            for source_col, label in enumerate(est_classes):
+                target_col = np.flatnonzero(self.classes_ == label)
+                if len(target_col) == 0:
+                    raise ValueError(
+                        f"Base estimator returned unknown class {label!r}; "
+                        f"ensemble classes are {self.classes_.tolist()}"
+                    )
+                aligned[:, int(target_col[0])] = est_proba[:, source_col]
+            probas += aligned
 
         return probas / len(self.estimators_)
 

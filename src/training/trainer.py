@@ -52,6 +52,7 @@ class TorchTrainingConfig:
     weight_decay: float = 1e-4
     device: str = "cpu"
     random_state: int | None = None
+    dataloader_seed: int | None = None
     log_interval: int | None = None
 
 
@@ -110,10 +111,24 @@ class TorchTrainingLoop:
 
         n_samples = len(X)
 
-        # 设置随机种子
+        # 设置模型初始化/训练随机性。调用方应在实例化模型前设置 model_seed；
+        # 这里仅负责训练过程的随机源，DataLoader 使用独立 generator。
         if config.random_state is not None:
             torch.manual_seed(config.random_state)
-            np.random.seed(config.random_state)
+
+        if config.batch_size < 1:
+            raise ValueError("batch_size must be positive")
+
+        # 仅含 BatchNorm 的模型不能用 singleton batch 计算批统计；模型适配器
+        # 在 fit 前会拒绝这种配置，训练循环也保留明确保护，避免零步训练。
+        has_batch_norm = any(
+            isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d))
+            for module in model.modules()
+        )
+        if has_batch_norm and config.batch_size < 2:
+            raise ValueError(
+                "batch_size must be at least 2 when the model contains BatchNorm"
+            )
 
         # 准备谓词 φ 数据
         has_constraints = constraints is not None and (
@@ -145,6 +160,11 @@ class TorchTrainingLoop:
             batch_size=config.batch_size,
             shuffle=True,
             drop_last=False,
+            generator=(
+                torch.Generator().manual_seed(config.dataloader_seed)
+                if config.dataloader_seed is not None
+                else None
+            ),
         )
 
         # 构建 optimizer
@@ -161,8 +181,7 @@ class TorchTrainingLoop:
         # 日志间隔
         log_interval = config.log_interval or max(1, config.n_epochs // 10)
 
-        model.train()
-
+        optimizer_steps = 0
         for epoch in range(config.n_epochs):
             epoch_loss = 0.0
             epoch_mse = 0.0
@@ -177,8 +196,9 @@ class TorchTrainingLoop:
                     batch_X, batch_y, batch_w = batch
                     batch_phi = None
 
-                if batch_X.shape[0] == 1:
-                    # BatchNorm 需要 >1 个样本才能计算批统计；跳过最后一个单样本 batch
+                if batch_X.shape[0] == 1 and has_batch_norm:
+                    # 不允许 singleton BatchNorm batch；若每个 batch 都被跳过，
+                    # fit 末尾会抛出明确错误，而不是返回随机初始化模型。
                     continue
 
                 batch_X = batch_X.to(config.device)
@@ -204,6 +224,7 @@ class TorchTrainingLoop:
 
                 loss.backward()
                 optimizer.step()
+                optimizer_steps += 1
 
                 epoch_loss += loss.item()
                 if has_constraints and batch_phi is not None:
@@ -229,6 +250,12 @@ class TorchTrainingLoop:
                         config.n_epochs,
                         avg_loss,
                     )
+
+        if optimizer_steps == 0:
+            raise RuntimeError(
+                "Training completed zero optimizer steps. Increase batch_size or "
+                "disable BatchNorm for singleton batches."
+            )
 
         # 记录最终的 τ 值
         if has_constraints and logger is not None:

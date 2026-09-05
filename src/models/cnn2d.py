@@ -41,7 +41,7 @@ def _require_torch() -> None:
 if _TORCH_AVAILABLE:
 
     class _PatchConv(nn.Module):
-        def __init__(self, in_ch: int):
+        def __init__(self, in_ch: int, dropout: float = 0.3):
             super().__init__()
             self.features = nn.Sequential(
                 nn.Conv2d(in_ch, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(), nn.MaxPool2d(2),
@@ -49,7 +49,7 @@ if _TORCH_AVAILABLE:
                 nn.Conv2d(64, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(),
                 nn.AdaptiveAvgPool2d(1),
             )
-            self.classifier = nn.Sequential(nn.Dropout(0.3), nn.Linear(128, 1))
+            self.classifier = nn.Sequential(nn.Dropout(dropout), nn.Linear(128, 1))
             # LUSI 谓词约束：可学习 τ（sigmoid(alpha)）
             self.alpha = nn.Parameter(torch.tensor(0.0))
 
@@ -106,15 +106,20 @@ class Cnn2dClassifier(BaseEstimator, ClassifierMixin):
         self._predict_cells = None
 
         y = np.asarray(y, dtype=np.float32)
-        Xp = self._extract_patches(train_cells)
-        yt = torch.from_numpy(y).float()
-        sw = torch.from_numpy(np.asarray(sample_weight, dtype=np.float32)).float() if sample_weight is not None else None
+        # 训练张量和模型统一放置在配置的 device 上。
+        Xp = self._extract_patches(train_cells).to(self.device)
+        yt = torch.from_numpy(y).float().to(self.device)
+        sw = (
+            torch.from_numpy(np.asarray(sample_weight, dtype=np.float32)).float().to(self.device)
+            if sample_weight is not None
+            else None
+        )
 
         from ..training.losses import _build_combined_phi, weighted_mse_with_predicate
 
         has_constraints = constraints is not None and ("phi_vector" in constraints or "phi_vectors" in constraints)
         if has_constraints:
-            phi = _build_combined_phi(constraints, len(y), self.device)
+            phi = _build_combined_phi(constraints, len(y), torch.device(self.device))
         else:
             phi = None
 
@@ -122,10 +127,12 @@ class Cnn2dClassifier(BaseEstimator, ClassifierMixin):
         neg = len(y) - pos
         pos_weight = torch.tensor(neg / max(pos, 1))
         bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        # 与普通 CNN/MLP 一致：BatchNorm 初始化和训练均使用模型 seed。
         if self.random_state is not None:
             torch.manual_seed(self.random_state)
-            np.random.seed(self.random_state)
-        model = _PatchConv(in_ch=self.grid_.shape[2]).to(self.device)
+        model = _PatchConv(
+            in_ch=self.grid_.shape[2], dropout=self.dropout
+        ).to(self.device)
         opt = torch.optim.Adam(model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
         for ep in range(self.n_epochs):
             model.train()
@@ -151,14 +158,15 @@ class Cnn2dClassifier(BaseEstimator, ClassifierMixin):
     def set_predict_cells(self, cells):
         self._predict_cells = cells
 
-    @torch.no_grad()
     def _forward(self, cells):
+        _require_torch()
         model = self.model_
         model.eval()
-        patches = self._extract_patches(cells)
-        out = []
-        for i in range(0, len(patches), 256):
-            out.append(torch.sigmoid(model(patches[i:i + 256])).cpu().numpy())
+        with torch.no_grad():
+            patches = self._extract_patches(cells)
+            out = []
+            for i in range(0, len(patches), 256):
+                out.append(torch.sigmoid(model(patches[i:i + 256].to(self.device))).cpu().numpy())
         return np.concatenate(out)
 
     def predict_proba(self, X):
@@ -197,7 +205,9 @@ class Cnn2dClassifier(BaseEstimator, ClassifierMixin):
         model_state = state.pop("_model_state_dict", None)
         self.__dict__.update(state)
         if model_state and hasattr(self, "grid_"):
-            model = _PatchConv(in_ch=self.grid_.shape[2])
+            model = _PatchConv(
+                in_ch=self.grid_.shape[2], dropout=getattr(self, "dropout", 0.3)
+            )
             model.load_state_dict(model_state)
             self.model_ = model
 
@@ -215,8 +225,12 @@ class Cnn2dAdapter:
     def validate_config(params: Mapping[str, Any]) -> None:
         if int(params.get("patch", 15)) < 3:
             raise ValueError("cnn2d patch must be >= 3 (odd recommended)")
-        if int(params.get("n_epochs", 150)) < 1:
-            raise ValueError("cnn2d n_epochs must be positive")
+        batch_size = int(params.get("batch_size", 64))
+        if batch_size < 2:
+            raise ValueError("cnn2d batch_size must be at least 2 because CNN2D uses BatchNorm")
+        dropout = float(params.get("dropout", 0.3))
+        if not 0 <= dropout < 1:
+            raise ValueError("cnn2d dropout must be in [0, 1)")
 
     def build(self, params: Mapping[str, Any], seed: int) -> Cnn2dClassifier:
         return Cnn2dClassifier(

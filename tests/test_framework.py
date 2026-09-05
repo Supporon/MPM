@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import pickle
 import sys
 import tempfile
 import unittest
@@ -41,6 +42,40 @@ from src.validation.registry import METRIC_REGISTRY, SPLITTER_REGISTRY
 
 
 LACHLAN_CONFIG = ROOT / "configs" / "experiments" / "lachlan_rf_baseline.yaml"
+RAW_GIS_CONFIG = ROOT / "configs" / "experiments" / "lachlan_rf_raw_gis.yaml"
+
+LIB_MPM_SOURCE = """\"\"\"确定性替代 ``lib_mpm``：与 FakeLegacyOperators 等价的模块级函数。\"\"\"
+import numpy as np
+import pandas as pd
+
+
+def get_dist_line(xs, ys, line_files, distance_type):
+    assert distance_type == "geodesic"
+    assert len(line_files) == 14
+    return pd.DataFrame({"distance": np.arange(len(xs), dtype=float)})
+
+
+def get_cat_data(xs, ys, polygon_files, field):
+    prefix = "met" if field == "MetFacies" else ("rock" if "RockUnits" in str(polygon_files) else "intrusion")
+    return pd.DataFrame({prefix: ["unit"] * len(xs)})
+
+
+def get_grid_stat_features(xs, ys, paths, buffer_shape, buffer_size):
+    assert buffer_shape == "square"
+    assert buffer_size == 10
+    return pd.DataFrame({"stat": np.arange(len(xs), dtype=float)})
+
+
+def get_grid_tex_features(xs, ys, paths, buffer_size):
+    assert buffer_size == 10
+    return pd.DataFrame({"texture": np.arange(len(xs), dtype=float)})
+
+
+def get_grid_grad_stat_features(xs, ys, path, buffer_shape, buffer_size):
+    assert buffer_shape == "square"
+    assert buffer_size == 10
+    return pd.DataFrame({"gradient": np.arange(len(xs), dtype=float)})
+"""
 
 
 class FakeLegacyOperators:
@@ -100,6 +135,60 @@ def _write_synthetic_archive(root: Path) -> Path:
     (archive / "probability_map.tif").write_bytes(b"synthetic-tiff")
     (archive / "model_rf.pkl").write_bytes(b"synthetic-model")
     return archive
+
+
+def _write_synthetic_raw_gis(root: Path) -> dict:
+    """构建可运行的合成 raw_gis 环境（矢量 + 栅格目录 + 假 lib_mpm）。"""
+    import geopandas as gpd
+    from shapely.geometry import Point, box
+
+    (root / "lib_mpm.py").write_text(LIB_MPM_SOURCE, encoding="utf-8")
+
+    for key in ("magnetic", "gravity", "radiometric", "remote_sensing"):
+        directory = root / key
+        directory.mkdir(parents=True)
+        (directory / "dummy.tif").write_bytes(b"synthetic-tiff")
+    elevation = root / "elevation.tif"
+    elevation.write_bytes(b"synthetic-tiff")
+
+    n_positive = 20
+    xs = np.linspace(1.0, 9.0, n_positive)
+    ys = np.linspace(1.0, 9.0, n_positive)
+    occurrence = gpd.GeoDataFrame(
+        {"SIZE_CODE": ["VLG"] * n_positive},
+        geometry=[Point(x, y) for x, y in zip(xs, ys)],
+        crs="EPSG:3857",
+    )
+    occurrence_path = root / "occurrence.shp"
+    occurrence.to_file(occurrence_path)
+
+    boundary = gpd.GeoDataFrame(geometry=[box(0, 0, 10, 10)], crs="EPSG:3857")
+    boundary_path = root / "boundary.shp"
+    boundary.to_file(boundary_path)
+    training_boundary_path = root / "training_boundary.shp"
+    boundary.to_file(training_boundary_path)
+
+    geology_dir = root / "geology"
+    geology_dir.mkdir(parents=True)
+
+    return {
+        "root": str(root),
+        "occurrence": str(occurrence_path),
+        "boundary": str(boundary_path),
+        "training_boundary": str(training_boundary_path),
+        "magnetic": str(root / "magnetic"),
+        "gravity": str(root / "gravity"),
+        "radiometric": str(root / "radiometric"),
+        "remote_sensing": str(root / "remote_sensing"),
+        "elevation": str(elevation),
+        "seismic": str(geology_dir / "seismic.shp"),
+        "geology": {
+            "line_files": [str(geology_dir / f"line_{i}.shp") for i in range(13)],
+            "metamorphic_facies": [str(geology_dir / "metamorphic.shp")],
+            "intrusions": str(geology_dir / "intrusions.shp"),
+            "rock_units": str(geology_dir / "RockUnits.shp"),
+        },
+    }
 
 
 class FrameworkTests(unittest.TestCase):
@@ -672,6 +761,240 @@ class FrameworkTests(unittest.TestCase):
             self.assertTrue((experiment.output_dir / "predictions" / "target_probs.csv").is_file())
             self.assertFalse((experiment.output_dir / "predictions" / "probability_map.tif").exists())
 
+    def test_bayes_run_records_tuning_summary_and_target_scaling(self) -> None:
+        """P1-07: manifest 记录调参轨迹（best_score/best_params/cv_results）与 target scaling。"""
+        try:
+            import skopt  # noqa: F401
+        except ImportError:  # pragma: no cover
+            self.skipTest("scikit-optimize not installed")
+        loaded = load_config(LACHLAN_CONFIG)
+        values = copy.deepcopy(loaded.values)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = _write_synthetic_archive(root)
+            values["dataset"] = {"root": str(root), "archive_dir": str(archive)}
+            values["experiment"]["output_dir"] = str(root / "outputs" / "bayes")
+            values["experiment"]["execution_mode"] = "train_from_archive_features"
+            values["model"] = {"name": "rf", "params": {"n_jobs": 1}}
+            values["tuning"] = {
+                "name": "bayes",
+                "params": {
+                    "n_iter": 2,
+                    "n_jobs": 1,
+                    "search_space": {
+                        "n_estimators": {"type": "integer", "low": 5, "high": 15},
+                    },
+                },
+            }
+            values["validation"]["cross_validation"] = {
+                "name": "stratified_kfold",
+                "params": {"n_splits": 2, "shuffle": False},
+            }
+            values["prediction"] = {
+                "score_type": "relative_score",
+                "normalization": "minmax",
+                "export_geotiff": False,
+            }
+            validate_config(values)
+            experiment = Experiment(ExperimentConfig(values=values, source_path=loaded.source_path))
+            manifest = experiment.run()
+            self.assertEqual(manifest["status"], "completed")
+            summary = manifest["tuning_summary"]
+            self.assertIsNotNone(summary)
+            self.assertEqual(summary["tuner"], "bayes")
+            self.assertIn("best_score", summary)
+            self.assertIn("best_params", summary)
+            self.assertGreater(len(summary["cv_results"]), 0)
+            self.assertEqual(summary["cv_results"][0]["rank"], 1)
+            self.assertIsNotNone(manifest["target_scaling"])
+
+    def test_independent_cv_records_oof_predictions_and_fold_metrics(self) -> None:
+        """P1-01: tuning=none 时独立评价 CV 产出 OOF 预测与逐折指标。"""
+        loaded = load_config(LACHLAN_CONFIG)
+        values = copy.deepcopy(loaded.values)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = _write_synthetic_archive(root)
+            values["dataset"] = {"root": str(root), "archive_dir": str(archive)}
+            values["experiment"]["output_dir"] = str(root / "outputs" / "cv")
+            values["experiment"]["execution_mode"] = "train_from_archive_features"
+            values["model"] = {"name": "rf", "params": {"n_jobs": 1}}
+            values["tuning"] = {"name": "none", "params": {}}
+            values["validation"]["cross_validation"] = {
+                "name": "stratified_kfold",
+                "params": {"n_splits": 2, "shuffle": False},
+            }
+            values["prediction"] = {
+                "score_type": "probability",
+                "normalization": "none",
+                "export_geotiff": False,
+            }
+            validate_config(values)
+            experiment = Experiment(ExperimentConfig(values=values, source_path=loaded.source_path))
+            manifest = experiment.run()
+            self.assertEqual(manifest["status"], "completed")
+            cv = manifest["independent_cv"]
+            self.assertTrue(cv["run"])
+            self.assertEqual(cv["n_splits"], 2)
+            self.assertEqual(len(cv["folds"]), 2)
+            self.assertIn("f1", cv["aggregate_metrics"])
+            for fold in cv["folds"]:
+                self.assertGreater(fold["val_rows"], 0)
+                self.assertIn("metrics", fold)
+            oof_path = experiment.output_dir / "intermediate" / "oof_predictions.csv"
+            self.assertTrue(oof_path.is_file())
+            oof = pd.read_csv(oof_path)
+            self.assertEqual(len(oof), 4)
+            self.assertCountEqual(oof["row_index"].tolist(), [0, 1, 2, 3])
+            self.assertEqual(
+                set(oof.columns),
+                {"fold", "row_index", "y_true", "y_pred", "score", "sample_weight"},
+            )
+
+    def test_independent_cv_skips_when_too_few_samples(self) -> None:
+        """P1-01: 训练样本过少（少数类 < n_splits）时独立 CV 记录跳过原因。"""
+        loaded = load_config(LACHLAN_CONFIG)
+        values = copy.deepcopy(loaded.values)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = _write_synthetic_archive(root)
+            values["dataset"] = {"root": str(root), "archive_dir": str(archive)}
+            values["experiment"]["output_dir"] = str(root / "outputs" / "cv_skip")
+            values["experiment"]["execution_mode"] = "train_from_archive_features"
+            values["model"] = {"name": "rf", "params": {"n_jobs": 1}}
+            values["tuning"] = {"name": "none", "params": {}}
+            values["validation"]["cross_validation"] = {
+                "name": "stratified_kfold",
+                "params": {"n_splits": 10, "shuffle": False},
+            }
+            values["prediction"] = {
+                "score_type": "probability",
+                "normalization": "none",
+                "export_geotiff": False,
+            }
+            validate_config(values)
+            experiment = Experiment(ExperimentConfig(values=values, source_path=loaded.source_path))
+            manifest = experiment.run()
+            self.assertEqual(manifest["status"], "completed")
+            cv = manifest["independent_cv"]
+            self.assertFalse(cv["run"])
+            self.assertIn("reason", cv)
+
+    def test_per_sample_test_table_and_prediction_unit_id(self) -> None:
+        """P1-10: 逐样本测试表与预测表的稳定 unit_id 闭环。"""
+        loaded = load_config(LACHLAN_CONFIG)
+        values = copy.deepcopy(loaded.values)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = _write_synthetic_archive(root)
+            values["dataset"] = {"root": str(root), "archive_dir": str(archive)}
+            values["experiment"]["output_dir"] = str(root / "outputs" / "per_sample")
+            values["experiment"]["execution_mode"] = "train_from_archive_features"
+            values["model"] = {"name": "rf", "params": {"n_jobs": 1}}
+            values["tuning"] = {"name": "none", "params": {}}
+            values["validation"]["cross_validation"] = {
+                "name": "stratified_kfold",
+                "params": {"n_splits": 2, "shuffle": False},
+            }
+            values["prediction"] = {
+                "score_type": "probability",
+                "normalization": "none",
+                "export_geotiff": False,
+            }
+            validate_config(values)
+            experiment = Experiment(ExperimentConfig(values=values, source_path=loaded.source_path))
+            manifest = experiment.run()
+            self.assertEqual(manifest["status"], "completed")
+
+            test_table_path = experiment.output_dir / "intermediate" / "test_predictions.csv"
+            self.assertTrue(test_table_path.is_file())
+            test_table = pd.read_csv(test_table_path)
+            for column in ("row_index", "y_true", "y_pred", "score", "sample_weight"):
+                self.assertIn(column, test_table.columns)
+            self.assertEqual(len(test_table), 4)
+
+            pred_path = experiment.output_dir / "predictions" / "target_probs.csv"
+            pred = pd.read_csv(pred_path)
+            self.assertIn("unit_id", pred.columns)
+            self.assertEqual(list(pred["unit_id"]), list(range(len(pred))))
+
+    def test_injection_audit_flags_unconsumed_knowledge(self) -> None:
+        """P1-04: 启用了 knowledge 但无谓词消费时，manifest 记录可归因审计标志。"""
+        loaded = load_config(LACHLAN_CONFIG)
+        values = copy.deepcopy(loaded.values)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = _write_synthetic_archive(root)
+            values["dataset"] = {"root": str(root), "archive_dir": str(archive)}
+            values["experiment"]["output_dir"] = str(root / "outputs" / "audit")
+            values["experiment"]["execution_mode"] = "train_from_archive_features"
+            values["model"] = {"name": "rf", "params": {"n_jobs": 1}}
+            values["tuning"] = {"name": "none", "params": {}}
+            values["knowledge"] = {
+                "enabled": True,
+                "items": [{"name": "spatial_extent", "params": {}}],
+            }
+            values["predicates"] = {"enabled": False, "combine": "sequential", "items": []}
+            values["prediction"] = {
+                "score_type": "probability",
+                "normalization": "none",
+                "export_geotiff": False,
+            }
+            validate_config(values)
+            experiment = Experiment(ExperimentConfig(values=values, source_path=loaded.source_path))
+            manifest = experiment.run()
+            self.assertEqual(manifest["status"], "completed")
+            audit = manifest["injection_audit"]
+            self.assertTrue(audit["knowledge_enabled"])
+            self.assertEqual(audit["knowledge_providers"], ["spatial_extent"])
+            self.assertFalse(audit["predicates_enabled"])
+            self.assertTrue(audit["unconsumed_knowledge"])
+            self.assertFalse(audit["constraints_produced"])
+            self.assertIn("constraints_consumed", audit)
+
+    def test_torch_import_isolation_keeps_rf_path_working(self) -> None:
+        """P1-05: 无 torch 环境下 RF/归档路径仍可导入构建，MLP 显式报可选依赖错误。"""
+        import os
+        import subprocess
+
+        script = (
+            "import importlib.abc\n"
+            "import sys\n"
+            "import numpy as np\n"
+            "class _BlockTorch(importlib.abc.MetaPathFinder):\n"
+            "    def find_spec(self, fullname, path=None, target=None):\n"
+            "        if fullname == 'torch' or fullname.startswith('torch.'):\n"
+            "            raise ImportError(f\"No module named '{fullname}'\")\n"
+            "        return None\n"
+            "sys.meta_path.insert(0, _BlockTorch())\n"
+            "from src.core.bootstrap import load_builtin_components\n"
+            "load_builtin_components()\n"
+            "from src.models.registry import MODEL_REGISTRY\n"
+            "from src.core.contracts import OptionalDependencyError\n"
+            "rf = MODEL_REGISTRY.create('rf')\n"
+            "assert rf.build({'n_jobs': 1}, 42) is not None\n"
+            "X = np.array([[0.0, 1.0], [1.0, 0.0], [0.2, 0.8], [0.8, 0.2]], dtype=np.float32)\n"
+            "y = np.array([0, 1, 0, 1])\n"
+            "mlp = MODEL_REGISTRY.create('mlp').build({}, 42)\n"
+            "try:\n"
+            "    mlp.fit(X, y, sample_weight=np.ones(4))\n"
+            "except OptionalDependencyError:\n"
+            "    print('NO_TORCH_OK')\n"
+            "else:\n"
+            "    raise SystemExit('MLP fit without torch')\n"
+        )
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=str(ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("NO_TORCH_OK", result.stdout)
+
     def test_yaml_plugin_can_add_and_select_model_without_experiment_changes(self) -> None:
         loaded = load_config(LACHLAN_CONFIG)
         values = copy.deepcopy(loaded.values)
@@ -782,6 +1105,27 @@ class FrameworkTests(unittest.TestCase):
         config = load_config(LACHLAN_CONFIG)
         with self.assertRaisesRegex(ConfigError, "does not support list index"):
             apply_cli_overrides(config, ["predicates.items.0.name=all_ones"])
+
+    def test_cli_override_resolves_dataset_path_relative_to_config_root(self) -> None:
+        """P2: CLI 覆盖的 dataset 路径相对 config 根目录解析，而非 CWD。"""
+        config = load_config(LACHLAN_CONFIG)
+        overridden = apply_cli_overrides(config, ["dataset.root=tests"])
+        self.assertEqual(
+            Path(overridden.values["dataset"]["root"]), (ROOT / "tests").resolve()
+        )
+
+    def test_cli_override_rejects_nonexistent_dataset_path(self) -> None:
+        """P2: CLI 覆盖指向不存在路径时明确失败，而不是静默忽略。"""
+        config = load_config(LACHLAN_CONFIG)
+        with self.assertRaisesRegex(ConfigError, "non-existent path"):
+            apply_cli_overrides(config, ["dataset.root=definitely_missing_dir_xyz"])
+
+    def test_cli_override_allows_existing_dataset_path(self) -> None:
+        """P2: CLI 覆盖指向存在路径时通过。"""
+        config = load_config(LACHLAN_CONFIG)
+        with tempfile.TemporaryDirectory() as temporary:
+            overridden = apply_cli_overrides(config, [f"dataset.root={temporary}"])
+            self.assertTrue(Path(overridden.values["dataset"]["root"]).is_dir())
 
     def test_rf_seed_propagation_same_seed_same_model(self) -> None:
         """P0-5: 相同 seed 产生相同的 RF 模型"""
@@ -901,6 +1245,64 @@ class FrameworkTests(unittest.TestCase):
             self.assertIn("python_version", stored["environment"])
             self.assertIn("git_dirty", stored)
             self.assertTrue(any("sha256" in item for item in stored["output_files"]))
+
+    def test_failed_run_writes_failure_manifest(self) -> None:
+        """P2: 运行失败仍写出 status=failed 的 manifest 并记录异常摘要。"""
+        loaded = load_config(LACHLAN_CONFIG)
+        values = copy.deepcopy(loaded.values)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = _write_synthetic_archive(root)
+            (archive / "model_rf.pkl").unlink()  # 触发 archive_replay train 失败
+            values["dataset"] = {"root": str(root), "archive_dir": str(archive)}
+            values["experiment"]["output_dir"] = str(root / "outputs" / "replay")
+            values["experiment"]["execution_mode"] = "archive_replay"
+            experiment = Experiment(ExperimentConfig(values=values, source_path=loaded.source_path))
+            with self.assertRaises(FileNotFoundError):
+                experiment.run()
+            manifest_path = experiment.output_dir / "manifest.json"
+            self.assertTrue(manifest_path.is_file())
+            stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(stored["status"], "failed")
+            self.assertIn("failure", stored)
+            self.assertEqual(stored["failure"]["exception_type"], "FileNotFoundError")
+            self.assertEqual(stored["failure"]["phase"], "train")
+
+    def test_raw_gis_run_persists_fitted_preprocessor(self) -> None:
+        """P1-07: raw_gis 成功运行持久化已拟合预处理器（可独立重建预处理语义）。"""
+        try:
+            import geopandas  # noqa: F401
+        except ImportError:  # pragma: no cover
+            self.skipTest("geopandas/shapely not installed")
+        loaded = load_config(RAW_GIS_CONFIG)
+        values = copy.deepcopy(loaded.values)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            values["dataset"] = _write_synthetic_raw_gis(root)
+            values["experiment"]["output_dir"] = str(root / "outputs" / "rawgis")
+            values["prediction"] = {
+                "score_type": "probability",
+                "normalization": "none",
+                "export_geotiff": False,
+            }
+            experiment = Experiment(ExperimentConfig(values=values, source_path=loaded.source_path))
+            experiment.run()
+            preprocessor_path = experiment.output_dir / "models" / "preprocessor.pkl"
+            self.assertTrue(preprocessor_path.is_file())
+            with preprocessor_path.open("rb") as handle:
+                restored = pickle.load(handle)
+            self.assertIsInstance(restored, BaselinePreprocessor)
+            self.assertTrue(restored.scaler_fitted)
+            self.assertTrue(restored.encoder_fitted)
+            self.assertTrue(restored.feature_columns)
+            manifest = json.loads(
+                (experiment.output_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["status"], "completed")
+            self.assertIn(
+                "models/preprocessor.pkl",
+                [item["path"] for item in manifest["output_files"]],
+            )
 
     def test_setup_logging_closes_previous_handlers(self) -> None:
         """P0-7: 连续多个实验目录不应累积 FileHandler。"""
@@ -1262,6 +1664,79 @@ class FrameworkTests(unittest.TestCase):
         self.assertAlmostEqual(
             prediction_rate_auc(random_scores, random_labels, random_area), 0.5, delta=0.05
         )
+
+    def test_mpm_metrics_are_configurable(self) -> None:
+        """P1-03: MPM 面积指标可配置到 validation.metrics 并通过校验。"""
+        loaded = load_config(LACHLAN_CONFIG)
+        values = copy.deepcopy(loaded.values)
+        values["validation"]["metrics"] = ["f1", "prediction_rate_auc"]
+        values["validation"]["primary_metric"] = "f1"
+        validate_config(values)  # 不抛异常
+
+    def test_evaluate_classifier_computes_configured_mpm_metrics(self) -> None:
+        """P1-03: evaluate_classifier 按配置计算 MPM 面积指标（unit_area 存在时）。"""
+
+        class FixedModel:
+            def predict(self, features):
+                return np.array([0, 1, 0, 1])
+
+            def predict_proba(self, features):
+                return np.array([[0.9, 0.1], [0.1, 0.9], [0.8, 0.2], [0.2, 0.8]])
+
+        result = evaluate_classifier(
+            FixedModel(),
+            pd.DataFrame({"x": [0.0, 1.0, 2.0, 3.0]}),
+            pd.Series([0, 1, 0, 1]),
+            pd.Series([1.0, 1.0, 1.0, 1.0]),
+            ["f1", "prediction_rate_auc"],
+            unit_area=pd.Series([1.0, 1.0, 1.0, 1.0]),
+        )
+        self.assertIn("f1", result)
+        self.assertIn("prediction_rate_auc", result)
+
+    def test_evaluate_classifier_records_reason_when_unit_area_missing(self) -> None:
+        """P1-03: 请求 MPM 面积指标但 unit_area 缺失时记录明确原因。"""
+
+        class FixedModel:
+            def predict(self, features):
+                return np.array([0, 1, 0, 1])
+
+            def predict_proba(self, features):
+                return np.array([[0.9, 0.1], [0.1, 0.9], [0.8, 0.2], [0.2, 0.8]])
+
+        result = evaluate_classifier(
+            FixedModel(),
+            pd.DataFrame({"x": [0.0, 1.0, 2.0, 3.0]}),
+            pd.Series([0, 1, 0, 1]),
+            pd.Series([1.0, 1.0, 1.0, 1.0]),
+            ["prediction_rate_auc"],
+        )
+        self.assertIsNone(result["prediction_rate_auc"])
+        self.assertEqual(
+            result["prediction_rate_auc_not_computed_reason"], "unit_area not provided"
+        )
+
+    def test_prediction_grid_carries_unit_area(self) -> None:
+        """P1-03: point_local_environment 预测网格携带 unit_area = grid_size²。"""
+        try:
+            import geopandas as gpd
+            from shapely.geometry import box
+        except ImportError:  # pragma: no cover
+            self.skipTest("geopandas/shapely not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            boundary = gpd.GeoDataFrame(geometry=[box(0, 0, 10, 10)], crs="EPSG:3857")
+            boundary_path = root / "boundary.shp"
+            boundary.to_file(boundary_path)
+            task = TargetAreaPredictionTask(
+                {}, {"score_type": "probability", "normalization": "none", "export_geotiff": False}
+            )
+            units, _mask = task.build_prediction_units(
+                {"boundary": str(boundary_path)},
+                {"type": "point_local_environment", "prediction_grid_size": 2.0},
+            )
+            self.assertEqual(task.unit_area, 4.0)
+            self.assertEqual(units.attrs["unit_area"], 4.0)
 
     def test_multiple_constraint_predicates_merge_phi_vectors(self) -> None:
         """P1-2: 多个 constraint 谓词合并为 phi_vectors，不互相覆盖。"""

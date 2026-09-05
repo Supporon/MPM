@@ -39,6 +39,7 @@ P 矩阵将具有相似谓词特征的样本聚合在一起，在损失计算中
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Mapping
 
 import numpy as np
@@ -371,19 +372,26 @@ class CombinedPredicate:
             # 无子谓词时，默认使用全 1 谓词
             phi_vector = np.ones(len(data.features), dtype=np.float32)
             return data.with_constraints(
-                {"phi_vector": phi_vector},
+                {"phi_vectors": [{"name": self.name, "vector": phi_vector}]},
                 predicates_applied=list(
                     data.metadata.get("predicates_applied", [])
                 ) + [self.name],
             )
 
         phi_vectors = []
+        # 子谓词必须在去除历史 phi 载荷的干净副本上独立计算，避免把
+        # 上一级已写入的 phi_vector/phi_vectors 当作子谓词自身的输出收集。
+        clean_constraints = {
+            key: value
+            for key, value in data.constraints.items()
+            if key not in {"phi_vector", "phi_vectors"}
+        }
+        clean_base = replace(data, constraints=clean_constraints)
         for sub_spec in self.sub_predicates:
             sub_name = sub_spec["name"]
             sub_params = sub_spec.get("params", {})
             sub_predicate = PREDICATE_REGISTRY.create(sub_name, sub_params)
-            # 应用子谓词到临时数据副本
-            temp = sub_predicate.apply(data, context)
+            temp = sub_predicate.apply(clean_base, context)
             if "phi_vector" in temp.constraints:
                 vec = np.asarray(temp.constraints["phi_vector"], dtype=np.float32)
                 phi_vectors.append(
@@ -395,7 +403,7 @@ class CombinedPredicate:
         if not phi_vectors:
             phi_vector = np.ones(len(data.features), dtype=np.float32)
             return data.with_constraints(
-                {"phi_vector": phi_vector},
+                {"phi_vectors": [{"name": self.name, "vector": phi_vector}]},
                 predicates_applied=list(
                     data.metadata.get("predicates_applied", [])
                 ) + [self.name],

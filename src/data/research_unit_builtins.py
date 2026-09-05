@@ -9,7 +9,7 @@ import pandas as pd
 
 from .label_strategies import PositiveUnlabeledAsZeroStrategy
 from .registries import LABEL_STRATEGY_REGISTRY, RESEARCH_UNIT_REGISTRY
-from .samplers import _boundary_union, load_vector
+from .samplers import _boundary_union, _require_crs, load_vector
 
 
 @RESEARCH_UNIT_REGISTRY.decorator("point_local_environment")
@@ -33,11 +33,13 @@ class PointLocalEnvironmentUnit:
         self, occurrence_path: str, label_config: Mapping[str, Any]
     ) -> pd.DataFrame:
         occurrences = load_vector(occurrence_path)
+        occurrence_crs = _require_crs(occurrences, "Occurrence vector")
         label_strategy = LABEL_STRATEGY_REGISTRY.create(
-            label_config.get("strategy", "positive_unlabeled_as_zero"), {}
+            label_config.get("strategy", "positive_unlabeled_as_zero"),
+            label_config.get("params", {}),
         )
         labelled = label_strategy.apply_positive(occurrences, label_config)
-        return pd.DataFrame(
+        units = pd.DataFrame(
             {
                 "X": labelled.geometry.x,
                 "Y": labelled.geometry.y,
@@ -45,6 +47,8 @@ class PointLocalEnvironmentUnit:
                 "sample_weight": labelled["sample_weight"],
             }
         ).reset_index(drop=True)
+        units.attrs["crs"] = occurrence_crs
+        return units
 
     def build_prediction_units(
         self, boundary_path: str, grid_size: float
@@ -64,6 +68,9 @@ class PointLocalEnvironmentUnit:
             [Point(x, y).within(geometry) for x, y in zip(grid["X"], grid["Y"])],
             dtype=bool,
         )
-        return grid.loc[mask].reset_index(drop=True), np.column_stack(
-            (grid["X"], grid["Y"], mask)
-        )
+        prediction_grid = grid.loc[mask].reset_index(drop=True)
+        prediction_grid.attrs["crs"] = boundary.crs
+        # 规则网格单元面积（grid_size²，仅对米制投影 CRS 有意义）；供 MPM 面积
+        # 捕获指标（prediction-rate curve 等）使用。
+        prediction_grid.attrs["unit_area"] = float(grid_size) ** 2
+        return prediction_grid, np.column_stack((grid["X"], grid["Y"], mask))

@@ -108,6 +108,10 @@ def _build_combined_phi(
     """
     phi_list = []
 
+    # 接受旧版单向量输入以及规范化后的 phi_vectors。
+    if "phi_vector" in constraints and "phi_vectors" in constraints:
+        raise ValueError("constraints cannot contain both phi_vector and phi_vectors")
+
     # 格式 1: 直接的 phi_vector
     if "phi_vector" in constraints:
         vec = np.asarray(constraints["phi_vector"], dtype=np.float32)

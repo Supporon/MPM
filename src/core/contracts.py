@@ -39,6 +39,11 @@ class TrainingData:
         return replace(self, labels=aligned_labels, metadata=merged)
 
     def with_constraints(self, constraints: Mapping[str, Any], **metadata: Any) -> "TrainingData":
+        """合并约束与元数据，返回新的 ``TrainingData``。
+
+        约束按原键合并：单个约束谓词写入 ``phi_vector``，多个谓词由
+        ``PredicatePipeline`` 归一化为 ``phi_vectors``；本方法不做载荷改写。
+        """
         merged_constraints = dict(self.constraints)
         merged_constraints.update(constraints)
         merged_metadata = dict(self.metadata)

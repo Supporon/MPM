@@ -18,6 +18,7 @@ from sklearn.metrics import (
 )
 
 from .registry import METRIC_REGISTRY
+from .mpm_metrics import MPM_METRIC_NAMES
 
 
 MetricFunction = Callable[[Any, Any, Any, Any], Any]
@@ -76,6 +77,20 @@ def metric_mcc(labels, predictions, probabilities, sample_weight):
     return float(matthews_corrcoef(labels, predictions, sample_weight=sample_weight))
 
 
+def _mpm_metric_requires_unit_area(*args, **kwargs):
+    """MPM 面积捕获指标需要 unit_area，不能作为标准 4 参数 metric 直接调用。"""
+    raise ValueError(
+        "MPM area-capture metrics require per-unit area (unit_area) and are "
+        "computed via evaluate_classifier, not called directly."
+    )
+
+
+# 注册 MPM 指标键，使 validation.metrics 可配置（配置校验 loop 通过
+# METRIC_REGISTRY.require 识别）；实际计算在 evaluate_classifier 的 unit_area 分支。
+for _name in sorted(MPM_METRIC_NAMES):
+    METRIC_REGISTRY.register(_name, _mpm_metric_requires_unit_area)
+
+
 def build_metric_scorer(name: str, data):
     """从 Metric 注册表构建 SearchCV 评分器，并保留各折对应的样本权重。"""
     metric = METRIC_REGISTRY.get(name)
@@ -107,14 +122,23 @@ def evaluate_classifier(
     probabilities = model.predict_proba(features)[:, 1]
     names = tuple(metric_names or ("accuracy", "precision", "recall", "f1", "confusion_matrix", "roc_auc"))
     result: dict[str, Any] = {"row_count": int(len(labels))}
-    for name in names:
+    mpm_requested = [name for name in names if name in MPM_METRIC_NAMES]
+    standard_names = [name for name in names if name not in MPM_METRIC_NAMES]
+    for name in standard_names:
         metric = METRIC_REGISTRY.get(name)
         value = metric(labels, predictions, probabilities, sample_weight)
         if value is not None:
             result[name] = value
-    # MPM 面积捕获指标：仅在提供了每个预测单元的面积时计算
-    if unit_area is not None:
-        from .mpm_metrics import evaluate_mpm_metrics
+    # MPM 面积捕获指标：需要每个预测单元的面积；缺失时记录明确不可计算原因。
+    if mpm_requested:
+        if unit_area is not None:
+            from .mpm_metrics import evaluate_mpm_metrics
 
-        result.update(evaluate_mpm_metrics(probabilities, labels, unit_area))
+            computed = evaluate_mpm_metrics(probabilities, labels, unit_area)
+            for name in mpm_requested:
+                result[name] = computed[name]
+        else:
+            for name in mpm_requested:
+                result[name] = None
+                result[f"{name}_not_computed_reason"] = "unit_area not provided"
     return result

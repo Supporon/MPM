@@ -78,7 +78,7 @@ python -m pytest -q
 - RF：`nsw_rf_train.yaml`、`nsw_rf_constrained_allones.yaml`、`nsw_rf_constrained_spatial_box.yaml`
 - SPE：`nsw_spe_train.yaml`、`nsw_spe_constrained_allones.yaml`、`nsw_spe_constrained_spatial_box.yaml`
 
-> 以上清单共 22 个文件；可用 `find configs/experiments -maxdepth 1 -name 'nsw_*.yaml' | sort` 复核。仓库没有 `lachlan_*.yaml`、`archive_replay` 或 `raw_gis` 配置；旧文档中的这些命令不能直接运行。
+> 以上清单共 22 个 `nsw_*.yaml`（`train_from_archive_features`）；可用 `find configs/experiments -maxdepth 1 -name 'nsw_*.yaml' | sort` 复核。此外仓库另有 3 个 `lachlan_*.yaml`：`lachlan_rf_baseline.yaml`（`archive_replay`）、`lachlan_rf_phase2.yaml`（`train_from_archive_features` + bayes）、`lachlan_rf_raw_gis.yaml`（`raw_gis`）。
 
 ## 能力状态与已知限制
 
@@ -99,7 +99,7 @@ python -m pytest -q
 2. 归档特征配置使用 `random_holdout`，点级随机划分可能产生空间泄漏；现有指标不能直接解释为区域外推能力。
 3. `archive_replay` 是归档工件回放，不是从原始 GIS 重新计算的复现。
 4. `relative_score` 经过 MinMax 后只表示本次预测范围内的相对排序，不应跨区域或跨运行当作概率比较。
-5. 当前测试套件并非全绿：`python -m pytest -q` 的现状为 **16 failed, 75 passed, 3 warnings, 26 subtests passed**。失败均源于历史 `tests/test_framework.py` 仍引用仓库中已不存在的 `lachlan_rf_phase2.yaml` / `lachlan_rf_baseline.yaml`；本次文档更新不修改测试文件。
+5. 当前测试套件：`python -m pytest -q` 全绿（`121 passed, 1 skipped`；GDAL 未装时 GeoTIFF 导出测试跳过）。
 
 ## 输出目录
 

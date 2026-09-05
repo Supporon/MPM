@@ -1,0 +1,19 @@
+experiment:
+  name: lachlan_rf_baseline
+  seed: 42
+  output_dir: outputs/lachlan_rf_baseline
+  execution_mode: archive_replay
+task:
+  name: target_area_prediction
+  region: lachlan
+dataset:
+  root: ../EarthByte-MPM_Lachlan_Porphyry
+  archive_dir: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Outputs_Cu_Lachlan_v1.6
+model:
+  name: rf
+  params:
+    n_jobs: -1
+prediction:
+  score_type: relative_score
+  normalization: minmax
+  export_geotiff: true

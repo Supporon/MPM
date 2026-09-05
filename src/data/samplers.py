@@ -19,6 +19,11 @@ def load_vector(path: str):
     return gpd.read_file(path)
 
 
+def read_crs(path: str):
+    """读取矢量数据集的 CRS（缺失时返回 None），用于跨组件一致性校验。"""
+    return load_vector(path).crs
+
+
 def _require_crs(frame, what: str):
     """要求矢量数据带有 CRS，缺失时直接失败。"""
     if frame.crs is None:
@@ -87,4 +92,6 @@ class UniformBoundarySampler:
                 f"after {attempts} attempts (only {len(accepted_x)} accepted). "
                 "Check that the boundary is a valid polygon covering the requested extent."
             )
-        return pd.DataFrame({"X": accepted_x, "Y": accepted_y})
+        result = pd.DataFrame({"X": accepted_x, "Y": accepted_y})
+        result.attrs["crs"] = boundary.crs
+        return result

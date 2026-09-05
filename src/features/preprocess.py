@@ -71,6 +71,56 @@ class BaselinePreprocessor:
         self.encoder_fitted = False
         self.scaler_fitted = False
 
+    def clone(self) -> "BaselinePreprocessor":
+        """返回配置与种子相同、尚未拟合的新实例。"""
+        return BaselinePreprocessor(self.config, self.seed)
+
+    def fit_schema(
+        self,
+        frame: pd.DataFrame,
+        unit_columns: tuple[str, ...] | list[str] = ("X", "Y"),
+    ) -> "BaselinePreprocessor":
+        """在给定 frame 上确定特征 schema（相关性筛选列选择 + OHE 类别），不拟合 scaler。
+
+        用于「折内隔离」：特征 schema 在完整外层训练集确定一次，每个内层
+        CV 折只重拟合 scaler（见 :meth:`refit_scaler`），从而避免验证折样本
+        参与缩放统计。OHE 类别固定并配 ``handle_unknown="ignore"``，折内未见
+        类别在验证时映射为全零。
+        """
+        numerical, categorical = split_feature_columns(frame, unit_columns)
+
+        # 相关性筛选只使用传入的 frame
+        correlation = frame[numerical].corr(method="spearman").abs()
+        upper = correlation.where(np.triu(np.ones(correlation.shape), k=1).astype(bool))
+        dropped = [
+            column for column in upper.columns
+            if any(upper[column] > self.config["correlation_threshold"])
+        ]
+        self.numerical_columns = [column for column in numerical if column not in dropped]
+        self.categorical_columns = categorical
+        self.correlation = correlation
+
+        # OneHotEncoder 只在此确定类别（handle_unknown="ignore"）
+        if categorical:
+            self.encoder.fit(frame[categorical])
+            self.encoder_fitted = True
+            try:
+                self._encoded_columns = self.encoder.get_feature_names(categorical).tolist()
+            except AttributeError:
+                self._encoded_columns = self.encoder.get_feature_names_out(categorical).tolist()
+        else:
+            self._encoded_columns = []
+
+        self.feature_columns = list(self.numerical_columns) + list(self._encoded_columns)
+        return self
+
+    def refit_scaler(self, frame: pd.DataFrame) -> "BaselinePreprocessor":
+        """按已固定的 schema 在给定 frame 上重新拟合 StandardScaler（折内重拟合）。"""
+        if self.numerical_columns:
+            self.scaler.fit(frame[self.numerical_columns])
+            self.scaler_fitted = True
+        return self
+
     def fit(
         self,
         frame: pd.DataFrame,
@@ -82,36 +132,8 @@ class BaselinePreprocessor:
         划分必须先于本方法执行，训练折调用 ``fit``、验证/测试/目标折
         只调用 ``transform``。
         """
-        numerical, categorical = split_feature_columns(frame, unit_columns)
-
-        # 相关性筛选只使用训练折
-        correlation = frame[numerical].corr(method="spearman").abs()
-        upper = correlation.where(np.triu(np.ones(correlation.shape), k=1).astype(bool))
-        dropped = [
-            column for column in upper.columns
-            if any(upper[column] > self.config["correlation_threshold"])
-        ]
-        self.numerical_columns = [column for column in numerical if column not in dropped]
-        self.categorical_columns = categorical
-        self.correlation = correlation
-
-        # OneHotEncoder 只在训练折上拟合
-        if categorical:
-            self.encoder.fit(frame[categorical])
-            self.encoder_fitted = True
-            try:
-                self._encoded_columns = self.encoder.get_feature_names(categorical).tolist()
-            except AttributeError:
-                self._encoded_columns = self.encoder.get_feature_names_out(categorical).tolist()
-        else:
-            self._encoded_columns = []
-
-        # StandardScaler 只在训练折上拟合
-        if self.numerical_columns:
-            self.scaler.fit(frame[self.numerical_columns])
-            self.scaler_fitted = True
-
-        self.feature_columns = list(self.numerical_columns) + list(self._encoded_columns)
+        self.fit_schema(frame, unit_columns)
+        self.refit_scaler(frame)
         return self
 
     def transform(self, frame: pd.DataFrame) -> pd.DataFrame:

@@ -107,8 +107,9 @@ class LabelSpreadingClassifier(BaseEstimator, ClassifierMixin):
 
         self.inside_ = inside_2d
         self.classes_ = np.array([0, 1])
-        self._predict_cells = None
-        return self
+        # LabelSpreading 的内部校准折数由 fit_params 注入；默认按可用样本
+        # 数自适应，避免小样本时固定 5 折直接失败。
+        self.cv_folds_ = 5
 
     def _out_of_fold_scores(self, X, y, grid_arr, inside_2d, train_cells):
         """对训练点做 5 折 CV，返回每个训练点的 OOF 软分数。"""

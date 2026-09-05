@@ -25,7 +25,12 @@ class NoSearchTuner:
         cv_config: Mapping[str, Any],
         scoring: str,
         seed: int,
+        *,
+        model_seed: int | None = None,
+        dataloader_seed: int | None = None,
     ):
-        model = model_adapter.build(model_params, seed)
+        model = model_adapter.build(model_params, model_seed if model_seed is not None else seed)
+        if dataloader_seed is not None and hasattr(model, "dataloader_seed"):
+            model.dataloader_seed = dataloader_seed
         model.fit(data.features, data.labels, **fit_params_for(model_adapter, data))
         return model

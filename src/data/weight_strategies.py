@@ -27,13 +27,15 @@ class SizeCodeWeightStrategy:
         pass
 
     def compute(self, attributes: pd.DataFrame, weight_config: Mapping[str, Any]) -> pd.Series:
-        if "SIZE_CODE" not in attributes.columns:
-            raise ValueError("Occurrence data must include SIZE_CODE")
+        # 属性列名可配置（缺省 SIZE_CODE），避免绑定 NSW 专用字段。
+        column = str(self.params.get("column", "SIZE_CODE"))
+        if column not in attributes.columns:
+            raise ValueError(f"Occurrence data must include '{column}'")
         weights = weight_config
-        result = attributes["SIZE_CODE"].map(weights)
+        result = attributes[column].map(weights)
         if result.isna().any():
             missing = sorted(result.loc[result.isna()].unique())
-            raise ValueError(f"No configured sample weight for SIZE_CODE values: {missing}")
+            raise ValueError(f"No configured sample weight for {column} values: {missing}")
         return result
 
 

@@ -34,8 +34,12 @@ class PositiveUnlabeledAsZeroStrategy:
     def apply_positive(self, occurrences: pd.DataFrame, label_config: Mapping[str, Any]) -> pd.DataFrame:
         result = occurrences.copy()
         result["label"] = label_config["positive_value"]
+        # 权重策略可配置：默认 size_code（按 SIZE_CODE 映射），亦可用 uniform。
+        weight_cfg = label_config.get("weight_strategy", {"name": "size_code", "params": {}})
+        if isinstance(weight_cfg, str):
+            weight_cfg = {"name": weight_cfg, "params": {}}
         weight_strategy = WEIGHT_STRATEGY_REGISTRY.create(
-            "size_code", {}
+            weight_cfg["name"], weight_cfg.get("params", {})
         )
         result["sample_weight"] = weight_strategy.compute(
             result, label_config["sample_weight"]

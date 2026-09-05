@@ -191,6 +191,7 @@ class MLPClassifier(BaseEstimator, ClassifierMixin):
         tau_init: float = 0.5,
         learn_tau: bool = True,
         random_state: int | None = None,
+        dataloader_seed: int | None = None,
         device: str = "cpu",
     ):
         self.hidden_layers = hidden_layers if hidden_layers is not None else [64, 32]
@@ -203,6 +204,7 @@ class MLPClassifier(BaseEstimator, ClassifierMixin):
         self.tau_init = tau_init
         self.learn_tau = learn_tau
         self.random_state = random_state
+        self.dataloader_seed = dataloader_seed
         self.device = device
 
     def fit(self, X, y, sample_weight=None, constraints=None):
@@ -243,6 +245,10 @@ class MLPClassifier(BaseEstimator, ClassifierMixin):
             len(X), self.n_features_in_, self.n_epochs, self.batch_size, self.learning_rate,
         )
 
+        # 先设置随机种子，再构建 nn.Module；否则初始化权重不会受 random_state 控制。
+        if self.random_state is not None:
+            torch.manual_seed(self.random_state)
+
         # 构建模型
         self.model_ = MPM_MLP(
             n_features=self.n_features_in_,
@@ -278,6 +284,7 @@ class MLPClassifier(BaseEstimator, ClassifierMixin):
             weight_decay=self.weight_decay,
             device=self.device,
             random_state=self.random_state,
+            dataloader_seed=self.dataloader_seed,
         )
         TorchTrainingLoop.fit(
             self.model_,
@@ -346,6 +353,7 @@ class MLPClassifier(BaseEstimator, ClassifierMixin):
             "tau_init": self.tau_init,
             "learn_tau": self.learn_tau,
             "random_state": self.random_state,
+            "dataloader_seed": self.dataloader_seed,
             "device": self.device,
         }
 
@@ -431,6 +439,8 @@ class MLPAdapter:
         batch_size = int(params.get("batch_size", 64))
         if batch_size < 1:
             raise ValueError("mlp batch_size must be positive")
+        if bool(params.get("use_batch_norm", True)) and batch_size < 2:
+            raise ValueError("mlp batch_size must be at least 2 when use_batch_norm=true")
         learning_rate = float(params.get("learning_rate", 1e-3))
         if learning_rate <= 0:
             raise ValueError("mlp learning_rate must be positive")
@@ -474,6 +484,11 @@ class MLPAdapter:
             tau_init=float(resolved.get("tau_init", 0.5)),
             learn_tau=bool(resolved.get("learn_tau", True)),
             random_state=seed,
+            dataloader_seed=(
+                int(params["dataloader_seed"])
+                if "dataloader_seed" in params
+                else None
+            ),
             device=str(resolved.get("device", "cpu")),
         )
 

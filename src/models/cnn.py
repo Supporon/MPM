@@ -96,6 +96,7 @@ class CnnClassifier(BaseEstimator, ClassifierMixin):
         fc_units: int = 64,
         dropout: float = 0.3,
         random_state: int | None = None,
+        dataloader_seed: int | None = None,
         device: str = "cpu",
     ):
         self.n_epochs = n_epochs
@@ -107,6 +108,7 @@ class CnnClassifier(BaseEstimator, ClassifierMixin):
         self.fc_units = fc_units
         self.dropout = dropout
         self.random_state = random_state
+        self.dataloader_seed = dataloader_seed
         self.device = device
 
     def fit(self, X, y, sample_weight=None, constraints=None):
@@ -119,6 +121,10 @@ class CnnClassifier(BaseEstimator, ClassifierMixin):
         log = get_logger("cnn")
         log.info("CNN training: %d samples, %d features, %d epochs, batch=%d, lr=%.5f",
                  len(X), X.shape[1], self.n_epochs, self.batch_size, self.learning_rate)
+
+        # 先设置随机种子，再构建 nn.Module，以控制初始化权重。
+        if self.random_state is not None:
+            torch.manual_seed(self.random_state)
 
         self.model_ = MPMCnn1D(
             n_features=X.shape[1],
@@ -143,6 +149,7 @@ class CnnClassifier(BaseEstimator, ClassifierMixin):
             weight_decay=self.weight_decay,
             device=self.device,
             random_state=self.random_state,
+            dataloader_seed=self.dataloader_seed,
         )
         TorchTrainingLoop.fit(
             self.model_, X, y, training_config,
@@ -179,6 +186,7 @@ class CnnClassifier(BaseEstimator, ClassifierMixin):
             "fc_units": self.fc_units,
             "dropout": self.dropout,
             "random_state": self.random_state,
+            "dataloader_seed": self.dataloader_seed,
             "device": self.device,
         }
 
@@ -225,8 +233,8 @@ class CnnAdapter:
         if n_epochs < 1:
             raise ValueError("cnn n_epochs must be positive")
         batch_size = int(params.get("batch_size", 64))
-        if batch_size < 1:
-            raise ValueError("cnn batch_size must be positive")
+        if batch_size < 2:
+            raise ValueError("cnn batch_size must be at least 2 because CNN uses BatchNorm")
         learning_rate = float(params.get("learning_rate", 1e-3))
         if learning_rate <= 0:
             raise ValueError("cnn learning_rate must be positive")
@@ -245,6 +253,11 @@ class CnnAdapter:
             fc_units=int(params.get("fc_units", 64)),
             dropout=float(params.get("dropout", 0.3)),
             random_state=seed,
+            dataloader_seed=(
+                int(params["dataloader_seed"])
+                if "dataloader_seed" in params
+                else None
+            ),
             device=str(params.get("device", "cpu")),
         )
 

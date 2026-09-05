@@ -17,6 +17,21 @@ from __future__ import annotations
 import numpy as np
 
 
+# evaluate_mpm_metrics 默认产出的指标键。注册到 METRIC_REGISTRY 后可在
+# validation.metrics 中配置；这些指标需要 unit_area，缺失时不可计算。
+MPM_METRIC_NAMES = frozenset(
+    {
+        "capture_rate_at_area_0_01",
+        "capture_rate_at_area_0_05",
+        "capture_rate_at_area_0_10",
+        "area_fraction_at_capture_0_50",
+        "area_fraction_at_capture_0_80",
+        "area_fraction_at_capture_0_90",
+        "prediction_rate_auc",
+    }
+)
+
+
 def _validate(scores, labels, unit_area) -> None:
     scores = np.asarray(scores, dtype=float)
     labels = np.asarray(labels, dtype=float)

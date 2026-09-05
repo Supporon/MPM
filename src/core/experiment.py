@@ -54,6 +54,12 @@ class Experiment:
         self.output_dir = self.output_dir.parent / f"{self.output_dir.name}_{self.run_id}"
         self.values["experiment"]["output_dir"] = str(self.output_dir)
         self.status = "created"
+        self._failure: dict[str, Any] | None = None
+        self._tuning_summary: dict[str, Any] | None = None
+        self._target_scaling: tuple[float, float] | None = None
+        self._training_data: TrainingData | None = None
+        self._independent_cv: dict[str, Any] | None = None
+        self._injection_audit: dict[str, Any] | None = None
         # 从实验基础种子派生各用途种子，保证采样/划分/调参互不干扰且可复现
         self.seeds = derive_seeds(self.spec.seed)
         self.dataset: ArchiveDataset | None = None
@@ -145,6 +151,9 @@ class Experiment:
         self._raw_target_data = pipeline.extract(target_units)
         self._raw_target_mask = target_mask.reset_index(drop=True)
         self.component_metadata["feature_operators"] = pipeline.names
+        # 记录研究单元 CRS，供 manifest 溯源与导出一致性校验。
+        if self.task._research_crs_id is not None:
+            self.component_metadata["research_crs"] = self.task._research_crs_id
 
     def prepare_dataset(self) -> None:
         """校验归档 schema，或应用保留的基线预处理契约。"""
@@ -183,6 +192,10 @@ class Experiment:
             metadata={"units": units.reset_index(drop=True)} if units is not None else {},
         )
 
+    def _cross_validation_needs_coordinates(self) -> bool:
+        """空间 CV 划分需要逐行坐标；否则 ``build_cv`` 会因缺 metadata 报错。"""
+        return self.spec.cross_validation.name.startswith("spatial_")
+
     def _apply_label_refinement(self, data: TrainingData) -> TrainingData:
         if self.spec.label_refinement is None:
             return data
@@ -216,6 +229,29 @@ class Experiment:
         self.component_metadata["predicates"] = self.predicate_pipeline.names
         if knowledge:
             self.component_metadata["knowledge_artifacts"] = sorted(knowledge)
+        # P1-04 注入可归因审计：记录知识/谓词启用、约束产出与消费关系，
+        # 使"约束有无"的差异可归因（消融实验只切换目标机制）。
+        unconsumed_knowledge = bool(self.knowledge_pipeline.names) and not bool(
+            self.predicate_pipeline.names
+        )
+        self._injection_audit = {
+            "knowledge_enabled": bool(self.knowledge_pipeline.names),
+            "knowledge_providers": list(self.knowledge_pipeline.names),
+            "knowledge_artifacts": sorted(knowledge) if knowledge else [],
+            "predicates_enabled": bool(self.predicate_pipeline.names),
+            "predicates": [
+                {"name": item.name, "kind": getattr(item, "kind", "data_transform")}
+                for item in self.predicate_pipeline.items
+            ],
+            "constraints_produced": bool(result.constraints),
+            "unconsumed_knowledge": unconsumed_knowledge,
+        }
+        if unconsumed_knowledge:
+            self._log.warning(
+                "Knowledge providers %s are enabled but no predicate consumes them; "
+                "their artifacts will not affect training.",
+                self.knowledge_pipeline.names,
+            )
         return result
 
     def train(self) -> None:
@@ -232,11 +268,17 @@ class Experiment:
             self._log.info("Model replayed from archive: %s", source)
             return
 
+        # 折内隔离所需的未变换外层训练折特征；仅 raw_gis + 内层 CV 时填充。
+        raw_training: TrainingData | None = None
+
         if self.mode == "train_from_archive_features":
             assert self.dataset is not None
             grid_model = bool(getattr(self.model_adapter, "grid_model", False))
-            # 空间谓词需要坐标；grid 模型需要坐标 + 网格。仅当需要时重建，避免额外开销
-            units = self.dataset.point_units() if (self.spec.predicates or grid_model) else (None, None)
+            # 空间谓词需要坐标；grid 模型需要坐标 + 网格；空间 CV 需要坐标。
+            # 仅当需要时重建，避免额外开销。
+            units = self.dataset.point_units() if (
+                self.spec.predicates or grid_model or self._cross_validation_needs_coordinates()
+            ) else (None, None)
             training = self._training_from_frame(
                 self.dataset.train_split, self.dataset.feature_columns, units=units[0]
             )
@@ -292,6 +334,24 @@ class Experiment:
             test_split = split.test
 
             self.preprocessor.fit(train_split.features, unit_columns=unit_columns)
+            # 持久化已拟合的预处理器（相关性筛选 + OHE + scaler），使成功运行
+            # 可仅凭输出目录重建预处理语义（P1-07 工件 provenance）。
+            preprocessor_path = self.output_dir / "models" / "preprocessor.pkl"
+            with preprocessor_path.open("wb") as handle:
+                pickle.dump(self.preprocessor, handle)
+            self.output_files.append(preprocessor_path)
+            # 保留未变换的外层训练折特征（仅预处理器实际使用的列），供带内层
+            # CV 的 tuner（如 bayes）逐 fold 重拟合 scaler，避免验证折参与缩放
+            # 统计（P0-03 折内隔离）。
+            raw_columns = list(self.preprocessor.numerical_columns) + list(
+                self.preprocessor.categorical_columns
+            )
+            raw_training = TrainingData(
+                train_split.features[raw_columns].reset_index(drop=True),
+                train_split.labels.reset_index(drop=True),
+                train_split.sample_weight.reset_index(drop=True),
+                metadata={"units": train_split.metadata["units"].reset_index(drop=True)},
+            )
             train_features = self.preprocessor.transform(train_split.features)
             test_features = self.preprocessor.transform(test_split.features)
 
@@ -311,6 +371,7 @@ class Experiment:
             self.component_metadata["holdout"] = self.spec.holdout.name
 
         training = self._apply_knowledge_and_predicates(training)
+        self._training_data = training
         self._split_summary = {
             "train_rows": int(len(training.labels)),
             "test_rows": int(len(self._evaluation_data.labels)),
@@ -322,12 +383,24 @@ class Experiment:
                 f"Model '{self.model_adapter.name}' does not support predicate constraints: "
                 f"{sorted(training.constraints)}"
             )
+        if self._injection_audit is not None:
+            self._injection_audit["constraints_consumed"] = bool(training.constraints)
         tuner = TUNER_REGISTRY.create(self.spec.tuner.name)
+        # 折内隔离仅在「raw_gis + 内层 CV」时启用；PUB 标签细化与内层 CV 的组合
+        # 已在配置层拒绝，故这里 raw_training 与 label_refinement 不会同时出现。
+        fold_safe = bool(getattr(tuner, "uses_cross_validation", False)) and self.mode == "raw_gis"
         self._log.info(
-            "Training model '%s' with tuner '%s' (primary_metric=%s)",
-            self.spec.model.name, self.spec.tuner.name, self.spec.primary_metric,
+            "Training model '%s' with tuner '%s' (primary_metric=%s, fold_safe=%s)",
+            self.spec.model.name, self.spec.tuner.name, self.spec.primary_metric, fold_safe,
         )
         t_start = time.monotonic()
+        # 折内隔离参数仅传递给支持它们的 CV tuner；``none`` 等无内层 CV 的
+        # tuner 直接拟合已变换特征，无需这些参数。
+        fold_safe_kwargs = (
+            {"preprocessor": self.preprocessor, "raw_data": raw_training}
+            if fold_safe
+            else {}
+        )
         self.model = tuner.fit(
             self.model_adapter,
             training,
@@ -339,7 +412,11 @@ class Experiment:
             },
             self.spec.primary_metric,
             self.seeds["tuning_seed"],
+            model_seed=self.seeds["model_seed"],
+            dataloader_seed=self.seeds["dataloader_seed"],
+            **fold_safe_kwargs,
         )
+        self._tuning_summary = getattr(self.model, "_tuning_summary", None)
         elapsed = time.monotonic() - t_start
         self._log.info("Training completed in %.1fs", elapsed)
         self.component_metadata["model"] = self.spec.model.name
@@ -404,12 +481,184 @@ class Experiment:
             )
             self.metrics["mode"] = self.mode
             self.metrics["primary_metric"] = self.spec.primary_metric
+            self.metrics["independent_cv"] = self._run_independent_cv()
+            self._independent_cv = self.metrics["independent_cv"]
+            self._write_test_predictions(evaluation)
             primary_val = self.metrics.get(self.spec.primary_metric)
             self._log.info("Evaluation complete: %s=%.4f", self.spec.primary_metric, primary_val)
 
         path = self.output_dir / "metrics.json"
         write_json(path, self.metrics)
         self.output_files.append(path)
+
+    def _write_test_predictions(self, evaluation: TrainingData) -> None:
+        """保存测试集逐样本预测表（y_true/y_pred/score/权重，含逐行坐标）。
+
+        与 aggregate 指标互补：跨运行汇总、逐样本错误分析与逐空间点关联需要
+        该表。归档重放模式不调用（预测直接复制归档，不重新计算）。逐样本表为
+        尽力而为——任何模型评分异常只告警，不阻断评价或运行。
+        """
+        try:
+            y_pred = np.asarray(self.model.predict(evaluation.features)).ravel()
+            score = np.asarray(
+                self.model.predict_proba(evaluation.features)[:, 1], dtype=float
+            ).ravel()
+        except Exception as error:  # noqa: BLE001 - 逐样本表是尽力而为
+            self._log.warning("Skipping per-sample test table: %s", error)
+            return
+        table = pd.DataFrame(
+            {
+                "row_index": np.arange(len(evaluation.labels)),
+                "y_true": evaluation.labels.to_numpy(),
+                "y_pred": y_pred,
+                "score": score,
+                "sample_weight": evaluation.sample_weight.to_numpy(),
+            }
+        )
+        units = evaluation.metadata.get("units")
+        if isinstance(units, pd.DataFrame):
+            for col in ("X", "Y"):
+                if col in units.columns:
+                    table[col] = units[col].to_numpy()
+        path = self.output_dir / "intermediate" / "test_predictions.csv"
+        table.to_csv(path, index=False)
+        self.output_files.append(path)
+        self._log.info("Per-sample test table written to %s", path)
+
+    def _run_independent_cv(self) -> dict[str, Any]:
+        """在训练集上运行独立评价 CV，产出 OOF 预测与逐折指标。
+
+        与调参 CV 分离：即使 ``tuning=none``，也按
+        ``validation.cross_validation`` 配置运行一次评价，避免该配置被静默
+        忽略（P1-01）。每折构建全新模型，评估最终模型配置在未见过折上的
+        泛化，并保存每折 train/val 规模与类别计数、逐折指标与 OOF 表。
+
+        无法安全切片时（grid 模型、约束谓词、外层全量拟合的 PUB 标签细化）
+        返回带 ``reason`` 的跳过说明，而非产生有偏评价。
+        """
+        from ..models.registry import fit_params_for
+        from ..validation.splitters import build_cv
+
+        if self.mode == "archive_replay":
+            return {"run": False, "reason": "archive_replay replays archived model; no refit."}
+        if self.spec.cross_validation.name == "none":
+            return {"run": False, "reason": "validation.cross_validation.name is 'none'."}
+        training = self._training_data
+        if training is None:
+            return {"run": False, "reason": "no training data recorded for independent CV."}
+        if getattr(self.model_adapter, "grid_model", False):
+            return {"run": False, "reason": "grid models require fold-specific cells; not supported."}
+        if training.constraints:
+            return {"run": False, "reason": "predicate constraints cannot be sliced per fold."}
+        if self.spec.label_refinement is not None:
+            return {
+                "run": False,
+                "reason": "label refinement (PUB) labels are fit on the full outer train set; "
+                "per-fold refit would leak validation labels.",
+            }
+
+        cv = build_cv(
+            self.spec.cross_validation.name,
+            self.spec.cross_validation.params,
+            self.seeds["split_seed"],
+            training,
+        )
+        model_params = (
+            dict(self._best_params) if self._best_params is not None else dict(self.spec.model.params)
+        )
+        try:
+            fold_splits = list(cv.split(training.features, training.labels))
+        except ValueError as error:
+            # 训练样本过少（如 StratifiedKFold 少数类样本数 < n_splits）时，
+            # 独立 CV 无法切片，记录原因并跳过，而非让整次运行失败。
+            if "n_splits" in str(error) or "populated" in str(error):
+                return {
+                    "run": False,
+                    "reason": f"cross_validation could not split the training data: {error}",
+                }
+            raise
+
+        folds: list[dict[str, Any]] = []
+        oof_rows: list[dict[str, Any]] = []
+        for fold, (train_idx, val_idx) in enumerate(fold_splits):
+            fold_train = training.take([int(i) for i in train_idx])
+            fold_val = training.take([int(i) for i in val_idx])
+            model = self.model_adapter.build(model_params, self.seeds["model_seed"])
+            if self.seeds.get("dataloader_seed") is not None and hasattr(model, "dataloader_seed"):
+                model.dataloader_seed = self.seeds["dataloader_seed"]
+            model.fit(
+                fold_train.features,
+                fold_train.labels,
+                **fit_params_for(self.model_adapter, fold_train),
+            )
+            fold_metrics = evaluate_classifier(
+                model,
+                fold_val.features,
+                fold_val.labels,
+                fold_val.sample_weight,
+                self.spec.metrics,
+                unit_area=fold_val.metadata.get("unit_area"),
+            )
+            proba = model.predict_proba(fold_val.features)[:, 1]
+            preds = model.predict(fold_val.features)
+            for row_idx, (y_true, y_pred, prob, wgt) in enumerate(
+                zip(
+                    fold_val.labels.to_numpy(),
+                    preds,
+                    proba,
+                    fold_val.sample_weight.to_numpy(),
+                )
+            ):
+                oof_rows.append(
+                    {
+                        "fold": fold,
+                        "row_index": int(val_idx[row_idx]),
+                        "y_true": int(y_true),
+                        "y_pred": int(y_pred),
+                        "score": float(prob),
+                        "sample_weight": float(wgt),
+                    }
+                )
+            folds.append(
+                {
+                    "fold": fold,
+                    "train_rows": int(len(fold_train.labels)),
+                    "val_rows": int(len(fold_val.labels)),
+                    "train_positives": int((fold_train.labels == 1).sum()),
+                    "val_positives": int((fold_val.labels == 1).sum()),
+                    "metrics": fold_metrics,
+                }
+            )
+
+        aggregate: dict[str, Any] = {}
+        for name in self.spec.metrics:
+            values = [f["metrics"].get(name) for f in folds]
+            scalars = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+            if scalars:
+                aggregate[name] = {
+                    "mean": float(np.mean(scalars)),
+                    "std": float(np.std(scalars)),
+                }
+            else:
+                aggregate[name] = None
+
+        oof_frame = pd.DataFrame(oof_rows)
+        oof_path = self.output_dir / "intermediate" / "oof_predictions.csv"
+        oof_frame.to_csv(oof_path, index=False)
+        self.output_files.append(oof_path)
+
+        self._independent_cv = {
+            "run": True,
+            "splitter": self.spec.cross_validation.name,
+            "n_splits": len(folds),
+            "model_params_source": (
+                "fitted_model.get_params()" if self._best_params is not None else "model.params"
+            ),
+            "folds": folds,
+            "aggregate_metrics": aggregate,
+            "oof_predictions": str(oof_path.relative_to(self.output_dir)),
+        }
+        return dict(self._independent_cv)
 
     def predict(self) -> None:
         """回放归档预测，或委托所选 Task 完成评分与导出。"""
@@ -444,6 +693,7 @@ class Experiment:
         if getattr(self.model_adapter, "grid_model", False):
             self.model.set_predict_cells(None)  # 预测阶段：在整幅有效单元上滑动
         predictions = self.task.predict(self.model, target_features, target_coords)
+        self._target_scaling = self.task.normalization_range
         self.output_files.extend(
             self.task.export_predictions(predictions, target_mask, prediction_dir)
         )
@@ -498,6 +748,11 @@ class Experiment:
             "feature_count": len(feature_schema),
             "split_summary": getattr(self, "_split_summary", None),
             "best_params": getattr(self, "_best_params", None),
+            "tuning_summary": self._tuning_summary,
+            "independent_cv": self._independent_cv,
+            "injection_audit": self._injection_audit,
+            "target_scaling": self._target_scaling,
+            "failure": self._failure,
             "git_commit": git_commit(git_root),
             "git_dirty": git_dirty(git_root),
             "environment": environment_summary(),
@@ -600,14 +855,29 @@ class Experiment:
             ("evaluate", self.evaluate),
             ("predict", self.predict),
         ]
+        t_start = time.monotonic()
+        current_phase: str | None = None
         try:
             for name, method in phases:
+                current_phase = name
                 t0 = time.monotonic()
                 method()
                 self._log.info("Phase '%s' completed in %.1fs", name, time.monotonic() - t0)
             self.status = "completed"
-        except Exception:
+        except Exception as error:
             self.status = "failed"
+            self._failure = {
+                "exception_type": type(error).__name__,
+                "message": str(error),
+                "phase": current_phase,
+                "elapsed_seconds": round(time.monotonic() - t_start, 3),
+            }
+            # 失败也原子写出 status=failed 的 manifest，保留异常摘要、耗时与已消费
+            # seed 账目，且不覆盖已有输出（manifest.json 在成功路径才写入）。
+            try:
+                self.export()
+            except Exception:
+                self._log.exception("Failed to persist failure manifest")
             raise
 
         manifest = self.export()
