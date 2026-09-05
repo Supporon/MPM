@@ -112,8 +112,8 @@ def plot_run(
     score_col = next(c for c in grid.columns if c in {"prob", "raw_score", "relative_score"})
     arr, extent, x_axis, y_axis = reconstruct_raster(archive_dir, grid[score_col].to_numpy(dtype=float))
 
-    # grid 型模型（cnn2d）predict_proba 只在网格上滑动 → 取最近网格单元的栅格值
-    if hasattr(model, "grid_"):
+    # grid 型模型（cnn2d / label_spreading）predict_proba 只在网格上滑动 → 取最近网格单元的栅格值
+    if hasattr(model, "inside_"):
         c_idx = np.argmin(np.abs(x_axis[None, :] - tbl.X.to_numpy()[:, None]), axis=1)
         r_idx = np.argmin(np.abs(y_axis[None, :] - tbl.Y.to_numpy()[:, None]), axis=1)
         point_prob = np.nan_to_num(arr[r_idx, c_idx], nan=0.0)

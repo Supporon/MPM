@@ -1,0 +1,48 @@
+experiment:
+  name: nsw_label_spreading
+  seed: 42
+  output_dir: outputs/nsw_label_spreading
+  execution_mode: train_from_archive_features
+  variant: baseline
+task:
+  name: target_area_prediction
+  region: nsw
+dataset:
+  root: ../EarthByte-MPM_Lachlan_Porphyry
+  archive_dir: ../EarthByte-MPM_Lachlan_Porphyry/Datasets/Outputs_Cu_NSW_v1.6
+model:
+  name: label_spreading
+  params:
+    kernel: knn
+    n_neighbors: 7
+    alpha: 0.2
+    max_iter: 30
+    n_jobs: -1
+validation:
+  holdout:
+    name: random_holdout
+    params:
+      test_size: 0.25
+  cross_validation:
+    name: stratified_kfold
+    params:
+      n_splits: 10
+      shuffle: false
+  metrics:
+  - accuracy
+  - precision
+  - recall
+  - f1
+  - roc_auc
+  - average_precision
+  - balanced_accuracy
+  - mcc
+  - confusion_matrix
+  primary_metric: f1
+tuning:
+  name: none
+  params: {}
+prediction:
+  score_type: relative_score
+  normalization: minmax
+  export_geotiff: false
