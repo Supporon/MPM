@@ -58,9 +58,21 @@ def prediction_rate_curve(
     labels = np.asarray(labels, dtype=float)
     unit_area = np.asarray(unit_area, dtype=float)
 
+    # 稳定降序排序后，把同分单元合并为一组同时入区。若不合并，相同分数的
+    # 单元仅因输入行序不同就会改变累计面积/捕获曲线（例如 [1,1,0,0] 与
+    # [0,0,1,1] 两种行序在四个等面积等分单元上得到不同 AUC）。
     order = np.argsort(-scores, kind="mergesort")
-    cum_area = np.cumsum(unit_area[order]) / unit_area.sum()
-    cum_pos = np.cumsum(labels[order]) / max(float(labels.sum()), 1e-12)
+    sorted_scores = scores[order]
+    sorted_area = unit_area[order]
+    sorted_labels = labels[order]
+    # 每个唯一下降分数段为一个组；boundaries 给出组起始索引（含末尾哨兵）。
+    boundaries = np.concatenate(
+        ([0], np.nonzero(np.diff(sorted_scores))[0] + 1, [len(scores)])
+    )
+    group_area = np.add.reduceat(sorted_area, boundaries[:-1])
+    group_pos = np.add.reduceat(sorted_labels, boundaries[:-1])
+    cum_area = np.cumsum(group_area) / unit_area.sum()
+    cum_pos = np.cumsum(group_pos) / max(float(labels.sum()), 1e-12)
 
     # 曲线起点为原点 (0 面积, 0 捕获)，终点为 (1, 1)
     cum_area = np.concatenate(([0.0], cum_area))

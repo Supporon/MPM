@@ -126,7 +126,7 @@ class Cnn2dClassifier(BaseEstimator, ClassifierMixin):
         pos = int(y.sum())
         neg = len(y) - pos
         pos_weight = torch.tensor(neg / max(pos, 1))
-        bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight, reduction="none")
         # 与普通 CNN/MLP 一致：BatchNorm 初始化和训练均使用模型 seed。
         if self.random_state is not None:
             torch.manual_seed(self.random_state)
@@ -134,24 +134,48 @@ class Cnn2dClassifier(BaseEstimator, ClassifierMixin):
             in_ch=self.grid_.shape[2], dropout=self.dropout
         ).to(self.device)
         opt = torch.optim.Adam(model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
+
+        # 实际按 batch_size 分批训练（此前 batch_size 只做校验、训练仍全批，
+        # 使该研究变量静默失效）；每批独立随机翻转做增强。
+        n = len(Xp)
+        optimizer_steps = 0
         for ep in range(self.n_epochs):
             model.train()
-            opt.zero_grad()
-            x = Xp
-            if torch.rand(1) > 0.5:
-                x = torch.flip(x, dims=[2])
-            if torch.rand(1) > 0.5:
-                x = torch.flip(x, dims=[3])
-            logits = model(x)
-            if has_constraints:
-                pred = torch.sigmoid(logits)
-                tau_hat = torch.sigmoid(model.alpha)
-                tau = 1 - tau_hat
-                loss = weighted_mse_with_predicate(pred, yt, phi, tau_hat, tau, sample_weight=sw)["total"]
-            else:
-                loss = bce(logits, yt)
-            loss.backward()
-            opt.step()
+            perm = torch.randperm(n)
+            for start in range(0, n, self.batch_size):
+                idx = perm[start:start + self.batch_size]
+                x = Xp[idx]
+                if torch.rand(1) > 0.5:
+                    x = torch.flip(x, dims=[2])
+                if torch.rand(1) > 0.5:
+                    x = torch.flip(x, dims=[3])
+                opt.zero_grad()
+                logits = model(x)
+                if has_constraints:
+                    pred = torch.sigmoid(logits)
+                    tau_hat = torch.sigmoid(model.alpha)
+                    tau = 1 - tau_hat
+                    batch_w = sw[idx] if sw is not None else None
+                    batch_phi = phi[idx]
+                    loss = weighted_mse_with_predicate(
+                        pred, yt[idx], batch_phi, tau_hat, tau, sample_weight=batch_w
+                    )["total"]
+                else:
+                    # baseline 分支也使用样本权重，与谓词分支一致，避免配置的
+                    # 权重实验在 CNN2D 上静默失效。
+                    losses = bce(logits, yt[idx])
+                    loss = (losses * sw[idx]).mean() if sw is not None else losses.mean()
+                loss.backward()
+                opt.step()
+                optimizer_steps += 1
+
+        # 保护：即使绕过配置校验直接构建估计器，也不允许零优化步训练被
+        # 当作已拟合模型保存/预测（与共享 trainer 的零步保护对齐）。
+        if optimizer_steps == 0:
+            raise RuntimeError(
+                "cnn2d training completed zero optimizer steps; set n_epochs >= 1 "
+                "and batch_size <= n_train_samples."
+            )
         self.model_ = model
         return self
 
@@ -225,6 +249,9 @@ class Cnn2dAdapter:
     def validate_config(params: Mapping[str, Any]) -> None:
         if int(params.get("patch", 15)) < 3:
             raise ValueError("cnn2d patch must be >= 3 (odd recommended)")
+        n_epochs = int(params.get("n_epochs", 150))
+        if n_epochs < 1:
+            raise ValueError("cnn2d n_epochs must be positive")
         batch_size = int(params.get("batch_size", 64))
         if batch_size < 2:
             raise ValueError("cnn2d batch_size must be at least 2 because CNN2D uses BatchNorm")

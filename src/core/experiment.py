@@ -526,12 +526,17 @@ class Experiment:
         self._log.info("Per-sample test table written to %s", path)
 
     def _run_independent_cv(self) -> dict[str, Any]:
-        """在训练集上运行独立评价 CV，产出 OOF 预测与逐折指标。
+        """在训练集上运行评价 CV，产出 OOF 预测与逐折指标。
 
         与调参 CV 分离：即使 ``tuning=none``，也按
         ``validation.cross_validation`` 配置运行一次评价，避免该配置被静默
         忽略（P1-01）。每折构建全新模型，评估最终模型配置在未见过折上的
         泛化，并保存每折 train/val 规模与类别计数、逐折指标与 OOF 表。
+
+        注意：当主训练用 ``bayes`` 等内层 CV 搜索选参时，本 CV 复用的是已
+        在整个外层训练集上选出的参数，因此是**选参后的诊断**而非对「含选参
+        过程」的独立泛化评估（该依赖由返回字典中的 ``selection_dependency``
+        显式标记）。外层 holdout 才是选参后的独立性能报告。
 
         无法安全切片时（grid 模型、约束谓词、外层全量拟合的 PUB 标签细化）
         返回带 ``reason`` 的跳过说明，而非产生有偏评价。
@@ -654,11 +659,23 @@ class Experiment:
             "model_params_source": (
                 "fitted_model.get_params()" if self._best_params is not None else "model.params"
             ),
+            "selection_dependency": self._cv_selection_dependency(),
             "folds": folds,
             "aggregate_metrics": aggregate,
             "oof_predictions": str(oof_path.relative_to(self.output_dir)),
         }
         return dict(self._independent_cv)
+
+    def _cv_selection_dependency(self) -> str | None:
+        """描述本评价 CV 的选参依赖；无内层 CV 搜索时为 None（参数固定）。"""
+        tuner = TUNER_REGISTRY.get(self.spec.tuner.name)
+        if not getattr(tuner, "uses_cross_validation", False):
+            return None
+        return (
+            f"model params were selected by tuner '{self.spec.tuner.name}' on the full "
+            "outer training set; this CV re-uses those params and is a post-selection "
+            "diagnostic, not an independent generalization estimate."
+        )
 
     def predict(self) -> None:
         """回放归档预测，或委托所选 Task 完成评分与导出。"""

@@ -100,8 +100,23 @@ def test_prediction_rate_auc_random_is_half():
     assert abs(prediction_rate_auc(scores, labels, area) - 0.5) < 0.05
 
 
+def test_prediction_rate_curve_ties_are_order_invariant():
+    """P0-06: 同分单元合并入区，结果不随输入行序变化。"""
+    area = np.array([1.0, 1.0, 1.0, 1.0])
+    scores = np.array([0.5, 0.5, 0.5, 0.5])
+    labels_a = np.array([1, 1, 0, 0])
+    labels_b = np.array([0, 0, 1, 1])
+    # 四个等面积等分单元全部同分：无论标签如何排列，曲线都应以 0.5 面积
+    # 捕获 0.5 正类（先 0 面积 0 捕获，后 1 面积 1 捕获），AUC 恒为 0.5。
+    auc_a = prediction_rate_auc(scores, labels_a, area)
+    auc_b = prediction_rate_auc(scores, labels_b, area)
+    assert abs(auc_a - 0.5) < 1e-9
+    assert abs(auc_b - 0.5) < 1e-9
+
+
 if __name__ == "__main__":
     test_evaluate_mpm_metrics_keys_and_values()
     test_evaluate_classifier_computes_configured_mpm_metrics_when_unit_area_provided()
     test_prediction_rate_auc_random_is_half()
+    test_prediction_rate_curve_ties_are_order_invariant()
     print("MPM 指标测试全部通过")

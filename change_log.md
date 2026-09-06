@@ -142,3 +142,14 @@
 - 剩余已知限制（未在本轮完成，属于计划中标注的「大」项，需结合实际数据/管线再定）：
   - P1-09 全量：石龙头当前数据为 MapGIS 逐几何特征矩阵（`numeric_feature_matrix.csv`/`all_features.csv` + GeoJSON 图层），与现有 NSW 归档（`Xy_rf_train`/`target_features`）和 `raw_gis`(lib_mpm) 均不同构，需新增显式输入适配与完整可运行 YAML（本轮已先完成字段可配置化与按算子收紧校验）。
   - P1-03 全量：在预测网格上以「含矿单元」标签做 prediction-rate/面积捕获率端到端评价（需明确 occurrence→网格单元的 deposit-in-cell 标签生成规则）；本轮已打通 unit_area 生产、指标注册、配置闭环与缺面积不可计算原因。
+
+## 2026-09-06T03:52:56Z
+- 依据 `MPM-main_v5_static_reaudit_2026-09-06.md` 复审结论，先逐条核对源码确认问题属实，再修复其中确定性/低风险问题（P0 批次 + 低风险 P1）：
+  - `src/models/cnn2d.py`（P0-03 零轮回归 + P1-07 权重/batch_size 失效）：`validate_config` 恢复 `n_epochs>=1` 校验；训练循环按 `batch_size` 真正分批（此前 batch_size 只做校验、训练仍全批，研究变量静默失效）；baseline 分支改用 `reduction="none"` 的 BCE 并乘以 `sample_weight`（此前 sw 已构造但 baseline 未使用，权重实验失效）；统计 `optimizer_steps`，零优化步时抛 RuntimeError（防止绕过配置校验直接构建估计器后保存随机模型）。
+  - `src/validation/mpm_metrics.py`（P0-06 同分序依赖）：`prediction_rate_curve` 改为稳定降序排序后把同分单元合并为一组同时入区（`np.diff` 找组边界 + `np.add.reduceat` 聚组），结果不再随输入行序变化（四个等面积等分单元 [1,1,0,0] 与 [0,0,1,1] 现在同为 AUC=0.5）。
+  - `src/training/constrained.py`（P0-05 多谓词抵消）：`extract_phi` 返回 φ 矩阵（`phi_vector`→1 行、`phi_vectors`→每谓词一行）并校验长度，不再 `np.sum` 求和；`ConstrainedReweighting.fit` 逐约束计算组内平均残差、逐约束判断收敛、逐约束重加权，并记录 `constraint_status_`（每次迭代每约束一个 g），避免两互斥组 +0.2/−0.2 聚合为 0 而误判收敛。
+  - `src/models/label_spreading.py`（P1-07 estimator 契约）：`fit` 恢复 `return self` 并在 `__init__`/`fit` 初始化 `_predict_cells=None`（未调用 set_predict_cells 也能预测）；新增可配置 `cv_folds`（默认 5）并透传 build/validate/get_params，内部校准折数按少数类样本数自动降折（少正例不再因 `StratifiedKFold` 折数超类别成员数而崩溃），记录实际折数 `cv_folds_`。
+  - `src/core/experiment.py`（P0-02 选参后 CV 被称独立）：`_run_independent_cv` 返回新增 `selection_dependency` 字段——主训练用 `bayes` 等内层 CV 搜索选参时，明确标记该 CV 是「选参后诊断」而非对含选参过程的独立泛化估计（外层 holdout 才是选参后独立报告）；`tuning=none` 时该字段为 None（参数固定，无选参依赖）。
+  - 新增测试：`tests/test_constrained.py`（φ 矩阵/逐约束状态/互斥组不相消）、`tests/test_cnn2d.py`（零轮校验、绕过校验零步保护、分批训练可预测）、`tests/test_label_spreading.py`（fit 返回 self、未 set_predict_cells 可预测、少正例自动降折）；`tests/test_mpm_metrics.py` 新增同分序不变性测试。
+- 验证：`python -m pytest -q -p no:cacheprovider tests/test_mpm_metrics.py tests/test_constrained.py tests/test_cnn2d.py tests/test_label_spreading.py` → 14 passed（CUDA 驱动版本告警与代码无关，CPU 训练不受影响）；`tests/test_framework.py -k "independent_cv or spe or failed_run or per_sample or injection or raw_gis_run"` → 8 passed；全量 `LOKY_MAX_CPU_COUNT=4 OMP_NUM_THREADS=2 python -m pytest -q -p no:cacheprovider` → **150 passed, 1 skipped, 26 subtests passed**（较上轮 139 passed 新增 11 项：test_constrained 5 + test_cnn2d 3 + test_label_spreading 2 + test_mpm_metrics 1）。
+- 未在本批处理（需要设计决策或较大改动，详见最终说明）：P0-01 全流程折内预处理隔离与独立 CV 复用原始特征、P0-04 谓词开关同时切换基础损失（BCE↔MSE）的单因素化、P1-01 逐折类别前置检查、P1-02 面积评价输入接通与 Bayes scorer。均已确认问题属实，保留待议。

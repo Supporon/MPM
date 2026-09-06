@@ -35,6 +35,7 @@ class LabelSpreadingClassifier(BaseEstimator, ClassifierMixin):
         max_iter: int = 30,
         n_jobs: int = -1,
         calibrate: bool = True,
+        cv_folds: int = 5,
         random_state: int = 42,
     ):
         self.kernel = kernel
@@ -43,7 +44,9 @@ class LabelSpreadingClassifier(BaseEstimator, ClassifierMixin):
         self.max_iter = max_iter
         self.n_jobs = n_jobs
         self.calibrate = calibrate
+        self.cv_folds = cv_folds
         self.random_state = random_state
+        self._predict_cells = None
 
     def _run_ls(self, X, y, grid_arr, inside_2d):
         """跑一次 LabelSpreading，返回 (H, W) 的网格软分数图（外部 NaN）。"""
@@ -107,18 +110,34 @@ class LabelSpreadingClassifier(BaseEstimator, ClassifierMixin):
 
         self.inside_ = inside_2d
         self.classes_ = np.array([0, 1])
-        # LabelSpreading 的内部校准折数由 fit_params 注入；默认按可用样本
-        # 数自适应，避免小样本时固定 5 折直接失败。
-        self.cv_folds_ = 5
+        # 未调用 set_predict_cells 时，predict_proba 默认在整幅有效单元上返回。
+        self._predict_cells = None
+        # 记录校准实际使用的折数（小样本时可能小于配置的 cv_folds）。
+        self.cv_folds_ = self._resolve_cv_folds(y)
+        return self
+
+    def _resolve_cv_folds(self, y) -> int:
+        """返回实际可用的校准折数（分层折数不能超过任一类样本数）。"""
+        counts = np.bincount(np.asarray(y, dtype=int).ravel(), minlength=2)
+        if counts.min() < 2:
+            return 0
+        return max(2, min(int(self.cv_folds), int(counts.min())))
 
     def _out_of_fold_scores(self, X, y, grid_arr, inside_2d, train_cells):
-        """对训练点做 5 折 CV，返回每个训练点的 OOF 软分数。"""
+        """对训练点做分层 CV，返回每个训练点的 OOF 软分数。
+
+        折数取 ``cv_folds``，但受少数类样本数约束（少正例时自动降折，避免
+        ``StratifiedKFold`` 因折数超过类别成员数而直接失败）。
+        """
         from sklearn.model_selection import StratifiedKFold
 
         oof = np.full(len(X), np.nan, dtype=float)
         if train_cells is None or len(np.unique(y)) < 2:
             return oof
-        skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=self.random_state)
+        n_splits = self._resolve_cv_folds(y)
+        if n_splits < 2:
+            return oof
+        skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=self.random_state)
         for tr_idx, va_idx in skf.split(X, y):
             map_fold = self._run_ls(X[tr_idx], y[tr_idx], grid_arr, inside_2d)
             cells_va = train_cells[va_idx]
@@ -145,7 +164,8 @@ class LabelSpreadingClassifier(BaseEstimator, ClassifierMixin):
         return {
             "kernel": self.kernel, "n_neighbors": self.n_neighbors,
             "alpha": self.alpha, "max_iter": self.max_iter, "n_jobs": self.n_jobs,
-            "calibrate": self.calibrate, "random_state": self.random_state,
+            "calibrate": self.calibrate, "cv_folds": self.cv_folds,
+            "random_state": self.random_state,
         }
 
     def set_params(self, **params):
@@ -167,6 +187,8 @@ class LabelSpreadingAdapter:
     def validate_config(params: Mapping[str, Any]) -> None:
         if int(params.get("n_neighbors", 7)) < 1:
             raise ValueError("label_spreading n_neighbors must be positive")
+        if int(params.get("cv_folds", 5)) < 2:
+            raise ValueError("label_spreading cv_folds must be at least 2")
 
     def build(self, params: Mapping[str, Any], seed: int) -> LabelSpreadingClassifier:
         return LabelSpreadingClassifier(
@@ -176,6 +198,7 @@ class LabelSpreadingAdapter:
             max_iter=int(params.get("max_iter", 30)),
             n_jobs=int(params.get("n_jobs", -1)),
             calibrate=bool(params.get("calibrate", True)),
+            cv_folds=int(params.get("cv_folds", 5)),
             random_state=seed,
         )
 

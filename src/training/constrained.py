@@ -21,15 +21,34 @@ from sklearn.base import BaseEstimator, ClassifierMixin, clone
 
 
 def extract_phi(constraints: Mapping[str, Any] | None, n: int) -> np.ndarray | None:
-    """从 constraints 提取合并的 φ 向量（支持 phi_vector / phi_vectors）。"""
+    """从 constraints 提取 φ 矩阵（shape ``(n_constraints, n)``）。
+
+    支持两种载荷格式：单个 ``phi_vector``（返回 1 行）与多谓词 ``phi_vectors``
+    （每谓词一行）。**不**再对多个 φ 向量求和：求和会让两个等规模互斥组
+    的残差相互抵消（例如 +0.2 与 −0.2 聚合为 0），从而误判约束已满足。
+    调用方应逐行计算残差并分别判断收敛。
+    """
     if not constraints:
         return None
     if "phi_vector" in constraints:
-        return np.asarray(constraints["phi_vector"], dtype=float).ravel()
+        vec = np.asarray(constraints["phi_vector"], dtype=float).ravel()
+        if len(vec) != n:
+            raise ValueError(f"phi_vector length {len(vec)} != n_samples {n}")
+        return vec.reshape(1, -1)
     if "phi_vectors" in constraints:
-        vecs = [np.asarray(v["vector"], dtype=float).ravel() for v in constraints["phi_vectors"]]
-        if vecs:
-            return np.sum(vecs, axis=0)
+        vecs = [
+            np.asarray(entry["vector"], dtype=float).ravel()
+            for entry in constraints["phi_vectors"]
+        ]
+        if not vecs:
+            return None
+        for entry, vec in zip(constraints["phi_vectors"], vecs):
+            if len(vec) != n:
+                raise ValueError(
+                    f"phi_vector '{entry.get('name', 'unknown')}' length "
+                    f"{len(vec)} != n_samples {n}"
+                )
+        return np.vstack(vecs)
     return None
 
 
@@ -55,19 +74,30 @@ class ConstrainedReweighting(BaseEstimator, ClassifierMixin):
         phi = extract_phi(constraints, n)
         w = np.asarray(sample_weight, dtype=float).copy() if sample_weight is not None else np.ones(n)
 
+        # 逐约束记录每次迭代的组内平均残差 g，供收敛状态与审计使用；
+        # 多个谓词分别满足，而非把各 φ 先求和再检查一个聚合值。
+        self.constraint_status_: list[dict[str, Any]] = []
         estimator = None
-        for _ in range(self.n_iter):
+        for iteration in range(self.n_iter):
             estimator = clone(self.base_estimator)
             estimator.fit(X, y, sample_weight=w)
-            if phi is None or phi.sum() <= 0:
+            if phi is None:
                 break
             p = estimator.predict_proba(X)[:, 1]
             e = p - y
-            g = float((phi * e).sum() / phi.sum())
-            if abs(g) < self.tol:
+            residuals = [
+                float((row * e).sum() / row.sum()) if row.sum() > 0 else 0.0
+                for row in phi
+            ]
+            self.constraint_status_.append({"iteration": iteration, "g": residuals})
+            if all(abs(g) < self.tol for g in residuals):
                 break
-            correction = (1.0 - y) if g > 0 else y  # 上调组内欠预测类
-            w = w * (1.0 + self.eta * phi * correction)
+            # 对每个未收敛约束独立重加权，再归一化；避免多约束相互抵消。
+            for row, g in zip(phi, residuals):
+                if abs(g) < self.tol:
+                    continue
+                correction = (1.0 - y) if g > 0 else y  # 上调组内欠预测类
+                w = w * (1.0 + self.eta * row * correction)
             w = w / w.mean()
         self.estimator_ = estimator
         self.classes_ = np.unique(y)
