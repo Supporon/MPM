@@ -142,13 +142,27 @@ class Cnn2dClassifier(BaseEstimator, ClassifierMixin):
         for ep in range(self.n_epochs):
             model.train()
             perm = torch.randperm(n)
-            for start in range(0, n, self.batch_size):
-                idx = perm[start:start + self.batch_size]
+            batches = [
+                perm[start:start + self.batch_size]
+                for start in range(0, n, self.batch_size)
+            ]
+            # 尾批若只剩单个样本，并入前一批：BatchNorm2d 训练态要求每个通道
+            # 有 >1 个元素，patch 较小（4~7）时两次池化后空间尺寸为 1×1，
+            # 单样本尾批会因每通道仅 1 个元素而失败（P1-01）。
+            if len(batches) >= 2 and len(batches[-1]) == 1:
+                batches[-2] = torch.cat([batches[-2], batches[-1]])
+                batches = batches[:-1]
+
+            for idx in batches:
                 x = Xp[idx]
                 if torch.rand(1) > 0.5:
                     x = torch.flip(x, dims=[2])
                 if torch.rand(1) > 0.5:
                     x = torch.flip(x, dims=[3])
+                # 样本权重全零的批次没有有效梯度贡献（加权 MSE 分母为 0 会
+                # 产生 NaN）；按"零权重 = 忽略该批"跳过，与共享 trainer 一致（P0-03）。
+                if sw is not None and float(sw[idx].sum()) <= 0:
+                    continue
                 opt.zero_grad()
                 logits = model(x)
                 if has_constraints:
@@ -165,6 +179,13 @@ class Cnn2dClassifier(BaseEstimator, ClassifierMixin):
                     # 权重实验在 CNN2D 上静默失效。
                     losses = bce(logits, yt[idx])
                     loss = (losses * sw[idx]).mean() if sw is not None else losses.mean()
+                # 保护：非有限损失（如梯度爆炸/数值溢出）不得反向传播污染参数，
+                # 避免把 NaN 模型当作有效训练产物保存（与共享 trainer 对齐）。
+                if not torch.isfinite(loss).item():
+                    raise RuntimeError(
+                        f"cnn2d loss is non-finite ({float(loss)}) at epoch {ep}; "
+                        "aborting before corrupting model parameters."
+                    )
                 loss.backward()
                 opt.step()
                 optimizer_steps += 1

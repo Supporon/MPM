@@ -63,3 +63,46 @@ def test_fit_minibatches_and_predicts():
     proba = model.predict_proba(None)
     assert proba.shape == (64, 2)  # 8×8 有效单元
     assert np.all((proba >= 0) & (proba <= 1))
+
+
+@pytest.mark.skipif(
+    __import__("importlib").util.find_spec("torch") is None,
+    reason="torch not installed",
+)
+def test_fit_merges_singleton_tail_batch():
+    """P1-01: 5 样本 + batch_size=4 + patch=5 的单样本尾批不再触发 BatchNorm 失败。"""
+    adapter = _adapter()
+    model = adapter.build({"n_epochs": 1, "batch_size": 4, "patch": 5, "device": "cpu"}, seed=0)
+    grid = np.random.default_rng(0).normal(size=(8, 8, 3)).astype(np.float32)
+    inside = np.ones((8, 8), dtype=bool)
+    cells = np.array([[0, 0], [1, 1], [2, 2], [3, 3], [4, 4]])
+    y = np.array([1, 0, 1, 0, 1], dtype=np.float32)
+    # patch=5 经两次池化后空间尺寸为 1×1，单样本批每通道仅 1 个元素，
+    # 未合并尾批时 BatchNorm2d 训练态会抛错。
+    model.fit(None, y, grid=grid, inside=inside, train_cells=cells)
+    proba = model.predict_proba(None)
+    assert proba.shape == (64, 2)
+    assert np.all(np.isfinite(proba))
+
+
+@pytest.mark.skipif(
+    __import__("importlib").util.find_spec("torch") is None,
+    reason="torch not installed",
+)
+def test_fit_skips_zero_weight_batches_without_nan():
+    """P0-03: 谓词分支下全零权重批不再产生 0/0=NaN 污染参数。"""
+    adapter = _adapter()
+    model = adapter.build({"n_epochs": 1, "batch_size": 2, "patch": 5, "device": "cpu"}, seed=0)
+    grid = np.random.default_rng(0).normal(size=(8, 8, 3)).astype(np.float32)
+    inside = np.ones((8, 8), dtype=bool)
+    cells = np.array([[0, 0], [1, 1], [2, 2], [3, 3], [4, 4], [5, 5]])
+    y = np.array([1, 0, 1, 0, 1, 0], dtype=np.float32)
+    # 只有一个样本带非零权重，其余批全零；旧实现会在加权 MSE 中 0/0=NaN。
+    sw = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    constraints = {"phi_vector": np.ones(6, dtype=np.float32)}
+    model.fit(
+        None, y, sample_weight=sw, grid=grid, inside=inside,
+        train_cells=cells, constraints=constraints,
+    )
+    proba = model.predict_proba(None)
+    assert np.all(np.isfinite(proba))

@@ -851,6 +851,42 @@ class FrameworkTests(unittest.TestCase):
                 {"fold", "row_index", "y_true", "y_pred", "score", "sample_weight"},
             )
 
+    def test_independent_cv_rf_constrained_uses_adapter_params(self) -> None:
+        """P1-02: rf_constrained + tuning=none 关闭谓词时，折内重建不再把
+        get_params() 的 base_estimator__... 嵌套键回灌给 RandomForestClassifier。"""
+        loaded = load_config(LACHLAN_CONFIG)
+        values = copy.deepcopy(loaded.values)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = _write_synthetic_archive(root)
+            values["dataset"] = {"root": str(root), "archive_dir": str(archive)}
+            values["experiment"]["output_dir"] = str(root / "outputs" / "cv_constrained")
+            values["experiment"]["execution_mode"] = "train_from_archive_features"
+            values["model"] = {
+                "name": "rf_constrained",
+                "params": {"n_estimators": 10, "n_jobs": 1, "n_iter": 2, "eta": 0.5, "tol": 1e-3},
+            }
+            values["tuning"] = {"name": "none", "params": {}}
+            values["validation"]["cross_validation"] = {
+                "name": "stratified_kfold",
+                "params": {"n_splits": 2, "shuffle": False},
+            }
+            values["prediction"] = {
+                "score_type": "probability",
+                "normalization": "none",
+                "export_geotiff": False,
+            }
+            validate_config(values)
+            experiment = Experiment(ExperimentConfig(values=values, source_path=loaded.source_path))
+            manifest = experiment.run()
+            self.assertEqual(manifest["status"], "completed")
+            cv = manifest["independent_cv"]
+            self.assertTrue(cv["run"])
+            self.assertEqual(cv["n_splits"], 2)
+            self.assertEqual(cv["n_valid_folds"], 2)
+            self.assertEqual(cv["model_params_source"], "model.params")
+            self.assertIn("f1", cv["aggregate_metrics"])
+
     def test_independent_cv_skips_when_too_few_samples(self) -> None:
         """P1-01: 训练样本过少（少数类 < n_splits）时独立 CV 记录跳过原因。"""
         loaded = load_config(LACHLAN_CONFIG)

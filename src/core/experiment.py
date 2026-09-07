@@ -525,6 +525,28 @@ class Experiment:
         self.output_files.append(path)
         self._log.info("Per-sample test table written to %s", path)
 
+    def _cv_model_params(self) -> dict[str, Any]:
+        """返回以 adapter 参数形态重建折内模型所需的参数。
+
+        调参器未做参数选择时（tuning=none），最终模型的 ``get_params()`` 只是
+        已配置参数的 sklearn 嵌套形式——对 rf_constrained/spe_constrained 等
+        包装器会把 ``base_estimator__...`` 键回灌给错误的构造器。此时直接复用
+        经过校验的原始 ``model.params``（adapter 参数），保证两种表示一致（P1-02）。
+
+        调参器做了选择时（如 bayes），把搜索空间内的选择结果合并回基础参数；
+        ``best_params`` 使用搜索空间的 adapter 参数名，而非包装器的嵌套形式。
+        """
+        base = dict(self.spec.model.params)
+        summary = self._tuning_summary
+        if not summary:
+            return base
+        selected = summary.get("best_params") or {}
+        for key, value in selected.items():
+            # fold_safe 的 Pipeline 前缀（model__）已在上游解包；这里兼容两种形态。
+            name = key[len("model__"):] if key.startswith("model__") else key
+            base[name] = value
+        return base
+
     def _run_independent_cv(self) -> dict[str, Any]:
         """在训练集上运行评价 CV，产出 OOF 预测与逐折指标。
 
@@ -568,9 +590,7 @@ class Experiment:
             self.seeds["split_seed"],
             training,
         )
-        model_params = (
-            dict(self._best_params) if self._best_params is not None else dict(self.spec.model.params)
-        )
+        model_params = self._cv_model_params()
         try:
             fold_splits = list(cv.split(training.features, training.labels))
         except ValueError as error:
@@ -588,6 +608,24 @@ class Experiment:
         for fold, (train_idx, val_idx) in enumerate(fold_splits):
             fold_train = training.take([int(i) for i in train_idx])
             fold_val = training.take([int(i) for i in val_idx])
+            train_classes = np.unique(fold_train.labels.to_numpy())
+            # 单类训练折会使 RF 等模型的 predict_proba 只返回一列，随后
+            # evaluator/OOF 无条件读取第二列会崩溃；前置检查并跳过该折，
+            # 记录明确不可评价原因与有效折数，而非让整次运行失败（P1-03）。
+            if len(train_classes) < 2:
+                folds.append(
+                    {
+                        "fold": fold,
+                        "skipped": True,
+                        "reason": "single-class training fold; cannot fit a binary "
+                        "classifier or produce a two-column predict_proba.",
+                        "train_rows": int(len(fold_train.labels)),
+                        "val_rows": int(len(fold_val.labels)),
+                        "train_positives": int((fold_train.labels == 1).sum()),
+                        "val_positives": int((fold_val.labels == 1).sum()),
+                    }
+                )
+                continue
             model = self.model_adapter.build(model_params, self.seeds["model_seed"])
             if self.seeds.get("dataloader_seed") is not None and hasattr(model, "dataloader_seed"):
                 model.dataloader_seed = self.seeds["dataloader_seed"]
@@ -635,9 +673,10 @@ class Experiment:
                 }
             )
 
+        evaluated_folds = [f for f in folds if not f.get("skipped")]
         aggregate: dict[str, Any] = {}
         for name in self.spec.metrics:
-            values = [f["metrics"].get(name) for f in folds]
+            values = [f["metrics"].get(name) for f in evaluated_folds]
             scalars = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
             if scalars:
                 aggregate[name] = {
@@ -656,8 +695,12 @@ class Experiment:
             "run": True,
             "splitter": self.spec.cross_validation.name,
             "n_splits": len(folds),
+            "n_valid_folds": len(evaluated_folds),
+            "n_skipped_folds": len(folds) - len(evaluated_folds),
             "model_params_source": (
-                "fitted_model.get_params()" if self._best_params is not None else "model.params"
+                "model.params + tuner.best_params"
+                if self._tuning_summary is not None
+                else "model.params"
             ),
             "selection_dependency": self._cv_selection_dependency(),
             "folds": folds,

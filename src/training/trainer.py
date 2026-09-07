@@ -205,6 +205,11 @@ class TorchTrainingLoop:
                 batch_y = batch_y.to(config.device)
                 batch_w = batch_w.to(config.device)
 
+                # 样本权重全零的批次没有有效梯度贡献（加权 MSE 分母为 0 会
+                # 产生 NaN）；按"零权重 = 忽略该批"跳过，与 CNN2D 保持一致（P0-03）。
+                if float(batch_w.sum()) <= 0:
+                    continue
+
                 optimizer.zero_grad()
                 logits = model(batch_X).squeeze(-1)  # [B]
 
@@ -221,6 +226,13 @@ class TorchTrainingLoop:
                     # 标准模式：BCEWithLogitsLoss（或其他 criterion）
                     losses = criterion(logits, batch_y)
                     loss = (losses * batch_w).mean()
+
+                # 保护：非有限损失不得反向传播污染参数，避免 NaN 模型被保存。
+                if not torch.isfinite(loss).item():
+                    raise RuntimeError(
+                        f"training loss is non-finite ({float(loss)}) at epoch {epoch}; "
+                        "aborting before corrupting model parameters."
+                    )
 
                 loss.backward()
                 optimizer.step()

@@ -153,3 +153,13 @@
   - 新增测试：`tests/test_constrained.py`（φ 矩阵/逐约束状态/互斥组不相消）、`tests/test_cnn2d.py`（零轮校验、绕过校验零步保护、分批训练可预测）、`tests/test_label_spreading.py`（fit 返回 self、未 set_predict_cells 可预测、少正例自动降折）；`tests/test_mpm_metrics.py` 新增同分序不变性测试。
 - 验证：`python -m pytest -q -p no:cacheprovider tests/test_mpm_metrics.py tests/test_constrained.py tests/test_cnn2d.py tests/test_label_spreading.py` → 14 passed（CUDA 驱动版本告警与代码无关，CPU 训练不受影响）；`tests/test_framework.py -k "independent_cv or spe or failed_run or per_sample or injection or raw_gis_run"` → 8 passed；全量 `LOKY_MAX_CPU_COUNT=4 OMP_NUM_THREADS=2 python -m pytest -q -p no:cacheprovider` → **150 passed, 1 skipped, 26 subtests passed**（较上轮 139 passed 新增 11 项：test_constrained 5 + test_cnn2d 3 + test_label_spreading 2 + test_mpm_metrics 1）。
 - 未在本批处理（需要设计决策或较大改动，详见最终说明）：P0-01 全流程折内预处理隔离与独立 CV 复用原始特征、P0-04 谓词开关同时切换基础损失（BCE↔MSE）的单因素化、P1-01 逐折类别前置检查、P1-02 面积评价输入接通与 Bayes scorer。均已确认问题属实，保留待议。
+
+## 2026-09-06T13:14:24Z
+- 依据 `MPM-main_v6_static_reaudit_2026-09-06.md` 复审结论，先逐条核对源码确认问题属实，再修复其中确定性/低风险问题（新增回归 P0-03、P1-01，遗留 P1-02、P1-03）：
+  - `src/models/cnn2d.py`（P0-03 零总权重批 NaN + P1-01 单样本尾批 BatchNorm）：分批循环先把最后只剩 1 个样本的尾批并入前一批（patch=4~7 时两次池化后空间尺寸 1×1，单样本批每通道仅 1 元素会在训练态 BatchNorm2d 抛错）；样本权重全零的批按「零权重=忽略该批」跳过（加权 MSE 分母为 0 会 0/0=NaN）；`loss.backward()` 前检查 `torch.isfinite(loss)`，非有限时抛 RuntimeError，避免把 NaN 模型当作有效产物保存。
+  - `src/training/trainer.py`（P0-03 共享训练循环一致规则）：同样对全零权重批跳过，并在 `loss.backward()` 前加非有限损失保护，与 CNN2D 保持一致。
+  - `src/core/experiment.py`（P1-02 约束模型关闭谓词后折内 CV 参数回灌错误）：新增 `_cv_model_params`——`tuning=none` 时直接复用经过校验的原始 `model.params`（adapter 参数），不再把 `rf_constrained`/`spe_constrained` 包装器 `get_params()` 产出的 `base_estimator__...` 嵌套键回灌给 `RandomForestClassifier`/`DecisionTreeClassifier` 等错误构造器；调参器选参时把 `best_params`（搜索空间内 adapter 参数名）合并回基础参数，替代原「任意 get_params 结果直接回灌 build」。返回字典 `model_params_source` 相应改为 `model.params` 或 `model.params + tuner.best_params`。
+  - `src/core/experiment.py`（P1-03 单类训练折崩溃）：`_run_independent_cv` 在拟合每折前检查训练折类别数，单类训练折（会使 RF 等 `predict_proba` 只返回一列、随后 evaluator/OOF 无条件读取第二列而崩溃）改为记录 `skipped`/`reason` 后跳过；聚合只统计有效折，返回新增 `n_valid_folds`/`n_skipped_folds`，避免把部分折均值误解为全部折均值。
+  - 新增测试：`tests/test_cnn2d.py`（单样本尾批合并、全零权重批不 NaN）、`tests/test_framework.py::test_independent_cv_rf_constrained_uses_adapter_params`（P1-02 回归）。
+- 验证：`python -m pytest -q` → 153 passed, 1 skipped, 26 subtests passed（较上轮 150 passed 新增 3 项）。
+- 未在本批处理（需要设计决策或较大改动，详见最终说明）：P0-01 内部 CV 折内完整预处理隔离、P0-02 谓词开关同时切换基础损失（BCE↔MSE）的单因素化、P1-04 面积评价输入与 Bayes scorer 接通、P1-05 知识独立作用、P1-06 GPU 恢复设备/权重与校准协议、P1-07/08/09 研究单元/跨运行汇总/石龙头适配。均已确认问题属实或属于实验协议缺口，保留待议。
