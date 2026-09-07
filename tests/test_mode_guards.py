@@ -47,3 +47,20 @@ def test_allows_grid_model_with_none_tuner_in_archive():
     ok["model"] = {"name": "cnn2d", "params": {}}
     ok["tuning"] = {"name": "none", "params": {}}
     validate_config(ok)  # 不抛异常
+
+
+def test_rejects_mpm_primary_metric_with_cv_tuner():
+    """P1-03: MPM 面积捕获指标需要 unit_area，不能作为内层 CV 评分函数。"""
+    load_builtin_components()
+    bad = copy.deepcopy(load_config(ARCHIVE).values)
+    bad["validation"]["metrics"] = ["accuracy", "prediction_rate_auc"]
+    bad["validation"]["primary_metric"] = "prediction_rate_auc"
+    bad["tuning"] = {
+        "name": "bayes",
+        "params": {
+            "n_iter": 2,
+            "search_space": {"n_estimators": {"type": "integer", "low": 5, "high": 10}},
+        },
+    }
+    with pytest.raises(ConfigError, match="area-capture"):
+        validate_config(bad)

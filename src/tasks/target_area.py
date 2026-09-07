@@ -183,7 +183,12 @@ class TargetAreaPredictionTask:
         invalid_inside = inside_indices[~valid_target_rows.to_numpy()]
         if len(invalid_inside):
             aligned_mask.loc[aligned_mask.index[invalid_inside], mask_column] = False
-        return target, target[["X", "Y"]].reset_index(drop=True), aligned_mask
+        # 坐标列连同稳定 unit_id 一起保留：unit_id 在网格创建时生成（规范网格
+        # 行号），NaN 过滤只删行不重编，保证同一网格下跨运行/跨特征组合稳定。
+        coord_columns = ["X", "Y"]
+        if "unit_id" in target.columns:
+            coord_columns.append("unit_id")
+        return target, target[coord_columns].reset_index(drop=True), aligned_mask
 
     def predict(self, model: Any, target_features: pd.DataFrame, target_coords: pd.DataFrame) -> pd.DataFrame:
         """返回有效目标单元的坐标与正类得分。
@@ -194,8 +199,9 @@ class TargetAreaPredictionTask:
         - ``relative_score``: 相对分数；``normalization=minmax`` 时做 MinMax 并记录范围，
           列名 ``relative_score``
 
-        每行带稳定 ``unit_id``（有效单元在规范网格序中的 0 基索引），供
-        逐样本表关联与跨运行汇总；同一网格定义下该 id 跨运行稳定。
+        每行带稳定 ``unit_id``：raw_gis 模式取网格创建时分配的规范网格行号
+        （经 NaN 过滤仍保留），同一网格定义下跨运行稳定；归档回放模式无规范
+        网格，回退为预计算目标集内的 0 基行号。供逐样本表关联与跨运行汇总。
         """
         score_type = self.prediction_config.get("score_type", "probability")
         if score_type not in {"probability", "raw_score", "relative_score"}:
@@ -226,9 +232,14 @@ class TargetAreaPredictionTask:
         elif normalization not in {None, "none"}:
             raise ValueError(f"Unsupported target score normalization: {normalization!r}")
 
+        unit_ids = (
+            target_coords["unit_id"].to_numpy()
+            if "unit_id" in target_coords.columns
+            else np.arange(len(scores))
+        )
         return pd.DataFrame(
             {
-                "unit_id": np.arange(len(scores)),
+                "unit_id": unit_ids,
                 "X": target_coords["X"].to_numpy(),
                 "Y": target_coords["Y"].to_numpy(),
                 score_col: scores,

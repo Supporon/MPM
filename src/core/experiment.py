@@ -39,6 +39,27 @@ from .config import ExperimentConfig
 from .contracts import SplitData, TrainingData
 
 
+class _KnowledgeAccessTracker(dict):
+    """记录谓词应用期间实际读取了哪些知识提供器。
+
+    谓词通过 ``context["knowledge"][provider_name]`` / ``.get(provider_name)``
+    消费知识。用 dict 子类在顶层拦截这些访问，使注入审计能区分「有谓词
+    存在」与「有谓词真正消费了知识」（P1-04），而非仅凭组件列表判定。
+    """
+
+    def __init__(self, data: Mapping[str, Any]):
+        super().__init__(data)
+        self.accessed: set[str] = set()
+
+    def __getitem__(self, key: str) -> Any:
+        self.accessed.add(key)
+        return super().__getitem__(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        self.accessed.add(key)
+        return super().get(key, default)
+
+
 class Experiment:
     """运行一个已解析实验，无需了解具体的 Model、Operator 或 Predicate 实现。"""
 
@@ -223,17 +244,21 @@ class Experiment:
             "research_unit": self.values["research_unit"],
         }
         knowledge = self.knowledge_pipeline.build(data, base_context)
-        context = {**base_context, "knowledge": knowledge}
+        tracked_knowledge = _KnowledgeAccessTracker(knowledge)
+        context = {**base_context, "knowledge": tracked_knowledge}
         result = self.predicate_pipeline.apply(data, context)
         self.component_metadata["knowledge"] = self.knowledge_pipeline.names
         self.component_metadata["predicates"] = self.predicate_pipeline.names
         if knowledge:
             self.component_metadata["knowledge_artifacts"] = sorted(knowledge)
-        # P1-04 注入可归因审计：记录知识/谓词启用、约束产出与消费关系，
-        # 使"约束有无"的差异可归因（消融实验只切换目标机制）。
-        unconsumed_knowledge = bool(self.knowledge_pipeline.names) and not bool(
-            self.predicate_pipeline.names
-        )
+        # P1-04 注入可归因审计：以「实际消费」而非「存在任何谓词」判定知识
+        # 是否进入训练。all_ones 等不读知识的谓词不应把知识误标为已消费。
+        enabled_names = list(self.knowledge_pipeline.names)
+        consumed_providers = sorted(set(tracked_knowledge.accessed) & set(enabled_names))
+        unconsumed_providers = [
+            name for name in enabled_names if name not in tracked_knowledge.accessed
+        ]
+        unconsumed_knowledge = bool(unconsumed_providers)
         self._injection_audit = {
             "knowledge_enabled": bool(self.knowledge_pipeline.names),
             "knowledge_providers": list(self.knowledge_pipeline.names),
@@ -244,13 +269,15 @@ class Experiment:
                 for item in self.predicate_pipeline.items
             ],
             "constraints_produced": bool(result.constraints),
+            "consumed_knowledge_providers": consumed_providers,
+            "unconsumed_knowledge_providers": unconsumed_providers,
             "unconsumed_knowledge": unconsumed_knowledge,
         }
         if unconsumed_knowledge:
             self._log.warning(
-                "Knowledge providers %s are enabled but no predicate consumes them; "
-                "their artifacts will not affect training.",
-                self.knowledge_pipeline.names,
+                "Knowledge providers %s are enabled but not consumed by any "
+                "predicate; their artifacts will not affect training.",
+                unconsumed_providers,
             )
         return result
 
@@ -584,12 +611,20 @@ class Experiment:
                 "per-fold refit would leak validation labels.",
             }
 
-        cv = build_cv(
-            self.spec.cross_validation.name,
-            self.spec.cross_validation.params,
-            self.seeds["split_seed"],
-            training,
-        )
+        try:
+            cv = build_cv(
+                self.spec.cross_validation.name,
+                self.spec.cross_validation.params,
+                self.seeds["split_seed"],
+                training,
+            )
+        except ValueError as error:
+            # 空间划分不可行（如仅一个空间块/组、缺坐标）时记录原因并跳过，
+            # 而非让整次运行失败；与少量样本无法切片的处理一致（P1-01）。
+            return {
+                "run": False,
+                "reason": f"cross_validation could not be built: {error}",
+            }
         model_params = self._cv_model_params()
         try:
             fold_splits = list(cv.split(training.features, training.labels))
@@ -623,6 +658,7 @@ class Experiment:
                         "val_rows": int(len(fold_val.labels)),
                         "train_positives": int((fold_train.labels == 1).sum()),
                         "val_positives": int((fold_val.labels == 1).sum()),
+                        "skipped_rows": [int(i) for i in val_idx],
                     }
                 )
                 continue
@@ -675,9 +711,16 @@ class Experiment:
 
         evaluated_folds = [f for f in folds if not f.get("skipped")]
         aggregate: dict[str, Any] = {}
+        # 逐指标有效折数：AUC/AP 等在单类验证折上返回 None，仅按「完成拟合」
+        # 计数会高估有效折数。这里分别记录每个指标有多少折给出标量值，让
+        # None 聚合可解释（P1-01）。
+        metric_valid_folds: dict[str, int] = {}
+        metric_missing_folds: dict[str, int] = {}
         for name in self.spec.metrics:
             values = [f["metrics"].get(name) for f in evaluated_folds]
             scalars = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+            metric_valid_folds[name] = len(scalars)
+            metric_missing_folds[name] = len(evaluated_folds) - len(scalars)
             if scalars:
                 aggregate[name] = {
                     "mean": float(np.mean(scalars)),
@@ -686,17 +729,37 @@ class Experiment:
             else:
                 aggregate[name] = None
 
-        oof_frame = pd.DataFrame(oof_rows)
+        # OOF 覆盖：被跳过折的验证样本没有 OOF 分数；记录覆盖/未覆盖样本与
+        # 正例覆盖数，避免把部分覆盖的 OOF 当作完整评价结果（P1-01）。
+        oof_columns = ["fold", "row_index", "y_true", "y_pred", "score", "sample_weight"]
+        oof_frame = pd.DataFrame(oof_rows, columns=oof_columns)
         oof_path = self.output_dir / "intermediate" / "oof_predictions.csv"
         oof_frame.to_csv(oof_path, index=False)
         self.output_files.append(oof_path)
 
-        self._independent_cv = {
+        covered_rows = {row["row_index"] for row in oof_rows}
+        total_rows = len(training.labels)
+        total_positives = int((training.labels == 1).sum())
+        covered_positives = sum(1 for row in oof_rows if int(row["y_true"]) == 1)
+        oof_coverage = {
+            "total_rows": total_rows,
+            "covered_rows": len(covered_rows),
+            "uncovered_rows": total_rows - len(covered_rows),
+            "total_positives": total_positives,
+            "covered_positives": covered_positives,
+            "coverage": (len(covered_rows) / total_rows) if total_rows else None,
+        }
+
+        evaluable = bool(evaluated_folds)
+        result: dict[str, Any] = {
             "run": True,
+            "evaluable": evaluable,
             "splitter": self.spec.cross_validation.name,
             "n_splits": len(folds),
             "n_valid_folds": len(evaluated_folds),
             "n_skipped_folds": len(folds) - len(evaluated_folds),
+            "metric_valid_folds": metric_valid_folds,
+            "metric_missing_folds": metric_missing_folds,
             "model_params_source": (
                 "model.params + tuner.best_params"
                 if self._tuning_summary is not None
@@ -705,8 +768,15 @@ class Experiment:
             "selection_dependency": self._cv_selection_dependency(),
             "folds": folds,
             "aggregate_metrics": aggregate,
+            "oof_coverage": oof_coverage,
             "oof_predictions": str(oof_path.relative_to(self.output_dir)),
         }
+        if not evaluable:
+            result["reason"] = (
+                "no fold produced an evaluable model (all training folds were "
+                "single-class or otherwise skipped); OOF is empty."
+            )
+        self._independent_cv = result
         return dict(self._independent_cv)
 
     def _cv_selection_dependency(self) -> str | None:

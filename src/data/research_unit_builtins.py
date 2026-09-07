@@ -69,6 +69,10 @@ class PointLocalEnvironmentUnit:
             dtype=bool,
         )
         prediction_grid = grid.loc[mask].reset_index(drop=True)
+        # 稳定 unit_id：有效单元在完整规范网格中的行号（mask 的 True 下标）。
+        # 该 id 只依赖边界与 grid_size，与后续特征算子的 NaN 过滤无关，因此
+        # 同一网格定义下跨特征组合、跨运行稳定（P1-05：过滤后重编 id 的问题）。
+        prediction_grid["unit_id"] = np.flatnonzero(mask)
         prediction_grid.attrs["crs"] = boundary.crs
         # 规则网格单元面积（grid_size²，仅对米制投影 CRS 有意义）；供 MPM 面积
         # 捕获指标（prediction-rate curve 等）使用。

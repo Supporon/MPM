@@ -163,3 +163,16 @@
   - 新增测试：`tests/test_cnn2d.py`（单样本尾批合并、全零权重批不 NaN）、`tests/test_framework.py::test_independent_cv_rf_constrained_uses_adapter_params`（P1-02 回归）。
 - 验证：`python -m pytest -q` → 153 passed, 1 skipped, 26 subtests passed（较上轮 150 passed 新增 3 项）。
 - 未在本批处理（需要设计决策或较大改动，详见最终说明）：P0-01 内部 CV 折内完整预处理隔离、P0-02 谓词开关同时切换基础损失（BCE↔MSE）的单因素化、P1-04 面积评价输入与 Bayes scorer 接通、P1-05 知识独立作用、P1-06 GPU 恢复设备/权重与校准协议、P1-07/08/09 研究单元/跨运行汇总/石龙头适配。均已确认问题属实或属于实验协议缺口，保留待议。
+
+## 2026-09-07T02:41:00Z
+- 依据 `MPM-main_v7_static_reaudit_2026-09-07.md` 复审结论，先逐条核对源码确认问题属实，再修复其中确定性/可局部修复问题：
+  - `src/models/mlp.py` / `src/models/cnn.py` / `src/models/cnn2d.py`（P1-02 GPU 恢复设备错位）：`__setstate__` 反序列化重建网络后补 `model.to(device)`，使网络与 `predict_proba`/`_forward` 按 `self.device` 迁移的输入一致；cnn2d `__setstate__` 补 `_require_torch()`。
+  - `src/validation/metrics.py` + `src/core/config.py`（P1-03 MPM 主指标调参必报错）：`build_metric_scorer` 对 MPM 面积捕获指标在构建评分器时即拒绝（而非每次调用才抛占位错误）；`_validate_mode_capabilities` 在配置层拒绝 `primary_metric` 为 MPM 指标 + CV 调参器的组合。
+  - `src/core/experiment.py`（P1-04 知识消费审计误判）：新增 `_KnowledgeAccessTracker`，在谓词应用期间实际拦截 `context["knowledge"]` 的访问；`injection_audit` 改为按「实际消费」记录 `consumed_knowledge_providers`/`unconsumed_knowledge_providers`，`unconsumed_knowledge` 不再仅凭「存在任何谓词」判定（all_ones 等不读知识的谓词不再把知识误标为已消费）。
+  - `src/data/research_unit_builtins.py` + `src/tasks/target_area.py`（P1-05 过滤后重编 unit_id）：`build_prediction_units` 在网格创建时写入稳定 `unit_id`（完整规范网格行号）；`prepare_prediction_data`/`predict` 全程保留该 id，不再在 NaN 过滤后 `np.arange` 重编，同一网格下跨特征组合/跨运行稳定。
+  - `src/core/experiment.py`（P1-01 逐指标有效折数与 OOF 覆盖）：`_run_independent_cv` 增加逐指标 `metric_valid_folds`/`metric_missing_folds`、`oof_coverage`（覆盖/未覆盖样本与正例数）、`evaluable` 标志；空 OOF 文件保持固定列 schema；`build_cv` 的空间可行性错误（如仅一个空间块/组）改为记录原因跳过而非抛错；被跳过折记录 `skipped_rows`。
+  - `src/models/cnn2d.py`（P1-06 patch=3 零尺寸 / 全数据仅一个样本）：`validate_config` 把 patch 下界从 3 提到 4（两次 MaxPool2d 后需保持 ≥1 空间尺寸）；`fit` 对训练样本数 <2 明确拒绝（尾批合并不覆盖单样本全量）。
+  - `GUIDE.md`：多种子示例改为保持 `experiment.name` 不变、只变 `experiment.seed`，使 `scripts/aggregate_runs.py` 能按名称归组汇总 mean±std，不再因 seed 拼进名称而拆组。
+  - 新增测试：`tests/test_cnn2d.py`（patch<4 拒绝）、`tests/test_mode_guards.py`（MPM primary_metric+CV tuner 拒绝）、`tests/test_mpm_metrics.py`（MPM 指标不能作为 scorer）。
+- 验证：`python -m pytest -q` → **156 passed, 1 skipped, 26 subtests passed**（较上轮 153 passed 新增 3 项）。
+- 未在本批处理（需要设计决策或较大改动，详见 v7 报告）：P0-01 内部 CV 折内完整预处理隔离、P0-02 谓词开关同时切换基础损失（BCE↔MSE）的单因素化、LabelSpreading 样本权重/校准协议、面积评价输入链与真实 Bayes scorer 接通、跨分辨率研究单元对应关系与配置指纹分组。均已确认问题属实或属于实验协议缺口，保留待议。

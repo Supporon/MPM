@@ -31,6 +31,16 @@ def test_validate_config_rejects_zero_epochs():
     adapter.validate_config({"n_epochs": 5, "batch_size": 8})
 
 
+def test_validate_config_rejects_patch_below_4():
+    """P1-06: patch=3 经两次 MaxPool2d 退化为 0 尺寸，配置层拒绝。"""
+    adapter = _adapter()
+    with pytest.raises(ValueError):
+        adapter.validate_config({"patch": 3})
+    # patch=4 起经两次池化仍保持 1×1，合法。
+    adapter.validate_config({"patch": 4})
+    adapter.validate_config({"patch": 15})
+
+
 @pytest.mark.skipif(
     __import__("importlib").util.find_spec("torch") is None,
     reason="torch not installed",

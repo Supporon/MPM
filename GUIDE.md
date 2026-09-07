@@ -1121,14 +1121,19 @@ python run.py --config configs/experiments/nsw_mlp_train.yaml \
 
 ### 9.3 相同模型多种子实验
 
-`experiment.seed` 会派生 sampling、split、tuning、model 和 dataloader 用途种子。应使用独立实验名保存每次结果，并报告均值与离散程度：
+`experiment.seed` 会派生 sampling、split、tuning、model 和 dataloader 用途种子。多种子应保持 `experiment.name`（及 `experiment.variant`）不变，只改变 `experiment.seed`：这样 `scripts/aggregate_runs.py` 才能把这些运行归入同一组，按 seed 汇总 mean±std。不要把 seed 拼进 `experiment.name`，否则汇总脚本会按名称拆成每组一个运行，无法得到跨种子统计：
 
 ```bash
 for seed in 42 123 456 789 2026; do
     python run.py --config configs/experiments/nsw_rf_train.yaml \
-        --set experiment.seed=$seed experiment.name=nsw_rf_seed_${seed}
+        --set experiment.seed=$seed
 done
+
+# 运行结束后汇总（各 run 的 manifest.json 已分别记录 seed）
+python scripts/aggregate_runs.py --runs-dir outputs/ --output outputs/_summary
 ```
+
+`experiment.name` 相同不会相互覆盖：每个运行输出目录都会追加微秒级时间戳 run_id。如需有意区分的实验变体，用 `experiment.variant` 而非名称。
 
 多种子只能衡量随机稳定性，不能消除随机点级划分的空间泄漏或 PU 标签偏差。
 

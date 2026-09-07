@@ -558,6 +558,7 @@ def _validate_mode_capabilities(config: Mapping[str, Any]) -> None:
     """按执行模式拒绝不生效的配置（配置必须产生行为）。"""
     from ..models.registry import MODEL_REGISTRY
     from ..tuning.registry import TUNER_REGISTRY
+    from ..validation.mpm_metrics import MPM_METRIC_NAMES
 
     mode = config["experiment"]["execution_mode"]
     grid_model = bool(
@@ -574,6 +575,20 @@ def _validate_mode_capabilities(config: Mapping[str, Any]) -> None:
                 f"model {config['model']['name']!r} is a grid model and cannot be "
                 f"tuned with CV-based tuner {config['tuning']['name']!r}: grid/inside/"
                 "train_cells metadata cannot be sliced per fold. Use tuning.name=none."
+            )
+
+    # MPM 面积捕获指标需要 unit_area，无法作为内层 CV 的评分函数；若作为
+    # primary_metric 配给 CV 调参器，评分器每次调用都会抛错。配置层提前拒绝，
+    # 与 build_metric_scorer 的运行时守卫保持一致（P1-03）。
+    if config["validation"]["primary_metric"] in MPM_METRIC_NAMES:
+        tuner = TUNER_REGISTRY.get(config["tuning"]["name"])
+        if getattr(tuner, "uses_cross_validation", False):
+            raise ConfigError(
+                f"validation.primary_metric={config['validation']['primary_metric']!r} "
+                "is an MPM area-capture metric and cannot be used with CV-based "
+                f"tuner {config['tuning']['name']!r}: it requires per-unit area "
+                "(unit_area). Use a standard scalar metric for tuning, or set "
+                "tuning.name=none."
             )
 
     if mode == "archive_replay":

@@ -93,6 +93,17 @@ for _name in sorted(MPM_METRIC_NAMES):
 
 def build_metric_scorer(name: str, data):
     """从 Metric 注册表构建 SearchCV 评分器，并保留各折对应的样本权重。"""
+    if name in MPM_METRIC_NAMES:
+        # MPM 面积捕获指标需要每个预测单元的面积（unit_area），其签名不满足
+        # sklearn 的 4 参数 scorer 约定，无法在 BayesSearchCV 内层折上计算。
+        # 这里在构建评分器时即拒绝，避免每次评分调用才抛出占位错误（P1-03）。
+        raise ValueError(
+            f"Primary metric '{name}' is an MPM area-capture metric and cannot be "
+            "used as a cross-validation scoring function: it requires per-unit "
+            "area (unit_area). Choose a standard scalar metric (e.g. f1, roc_auc) "
+            "for tuning, or use tuning.name=none and report the MPM metric in "
+            "evaluation."
+        )
     metric = METRIC_REGISTRY.get(name)
 
     def scorer(estimator, features, labels):

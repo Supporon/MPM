@@ -216,6 +216,9 @@ class CnnClassifier(BaseEstimator, ClassifierMixin):
                 dropout=self.dropout,
             )
             model.load_state_dict(model_state)
+            # 反序列化在 CPU 重建网络；同步迁移到记录的 device，与
+            # predict_proba 按 self.device 迁移输入保持一致（P1-02 设备错位）。
+            model = model.to(getattr(self, "device", "cpu"))
             self.model_ = model
 
 

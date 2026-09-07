@@ -106,6 +106,14 @@ class Cnn2dClassifier(BaseEstimator, ClassifierMixin):
         self._predict_cells = None
 
         y = np.asarray(y, dtype=np.float32)
+        if len(y) < 2:
+            # 尾批合并只在「至少两批且末批单样本」时生效；全训练集仅 1 个样本
+            # 时不存在前批，BatchNorm2d 训练态会因每通道仅 1 个元素而失败。
+            # 少样本不适用时明确拒绝，而非在 BatchNorm 处抛晦涩错误（P1-06）。
+            raise ValueError(
+                "cnn2d requires at least 2 training samples; a single sample "
+                "cannot form a valid BatchNorm2d batch."
+            )
         # 训练张量和模型统一放置在配置的 device 上。
         Xp = self._extract_patches(train_cells).to(self.device)
         yt = torch.from_numpy(y).float().to(self.device)
@@ -247,6 +255,7 @@ class Cnn2dClassifier(BaseEstimator, ClassifierMixin):
         return state
 
     def __setstate__(self, state):
+        _require_torch()
         model_state = state.pop("_model_state_dict", None)
         self.__dict__.update(state)
         if model_state and hasattr(self, "grid_"):
@@ -254,6 +263,9 @@ class Cnn2dClassifier(BaseEstimator, ClassifierMixin):
                 in_ch=self.grid_.shape[2], dropout=getattr(self, "dropout", 0.3)
             )
             model.load_state_dict(model_state)
+            # 反序列化在 CPU 重建网络；同步迁移到记录的 device，与
+            # _forward 按 self.device 迁移 patch 输入保持一致（P1-02 设备错位）。
+            model = model.to(getattr(self, "device", "cpu"))
             self.model_ = model
 
 
@@ -268,8 +280,12 @@ class Cnn2dAdapter:
 
     @staticmethod
     def validate_config(params: Mapping[str, Any]) -> None:
-        if int(params.get("patch", 15)) < 3:
-            raise ValueError("cnn2d patch must be >= 3 (odd recommended)")
+        # 两次 MaxPool2d 后空间尺寸 = floor(floor(patch/2)/2)，需 >= 1 才可
+        # 继续卷积与 AdaptiveAvgPool2d；patch=3 会退化为 0 尺寸并在运行时失败。
+        # 故下界为 4（patch=4~7 时末层 BatchNorm2d 空间尺寸为 1×1，训练仍要求
+        # 每个批 >= 2 样本，由 fit 内尾批合并与样本数守卫保证）。
+        if int(params.get("patch", 15)) < 4:
+            raise ValueError("cnn2d patch must be >= 4 (two MaxPool2d layers require it)")
         n_epochs = int(params.get("n_epochs", 150))
         if n_epochs < 1:
             raise ValueError("cnn2d n_epochs must be positive")

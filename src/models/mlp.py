@@ -397,6 +397,10 @@ class MLPClassifier(BaseEstimator, ClassifierMixin):
                 use_batch_norm=getattr(self, "use_batch_norm", True),
             )
             model.load_state_dict(model_state)
+            # 反序列化在 CPU 重建网络；这里把网络同步迁移到记录的 device，
+            # 与 predict_proba 按 self.device 迁移输入保持一致，避免 CUDA 训练
+            # 保存后恢复时网络在 CPU、输入仍送 CUDA 的设备错位（P1-02）。
+            model = model.to(getattr(self, "device", "cpu"))
             self.model_ = model
         if scaler_mean is not None and scaler_scale is not None:
             self.scaler_ = StandardScaler()

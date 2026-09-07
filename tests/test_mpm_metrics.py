@@ -11,9 +11,12 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import pytest
+
 from src.core.bootstrap import load_builtin_components
-from src.validation.metrics import evaluate_classifier
+from src.validation.metrics import build_metric_scorer, evaluate_classifier
 from src.validation.mpm_metrics import (
+    MPM_METRIC_NAMES,
     capture_rate_at_area_fraction,
     evaluate_mpm_metrics,
     prediction_rate_auc,
@@ -98,6 +101,14 @@ def test_prediction_rate_auc_random_is_half():
     labels = rng.integers(0, 2, 2000).astype(float)
     area = np.ones(2000)
     assert abs(prediction_rate_auc(scores, labels, area) - 0.5) < 0.05
+
+
+def test_build_metric_scorer_rejects_mpm_metric():
+    """P1-03: MPM 指标签名不含 unit_area，不能作为 SearchCV 评分器。"""
+    load_builtin_components()
+    for name in MPM_METRIC_NAMES:
+        with pytest.raises(ValueError, match="unit_area"):
+            build_metric_scorer(name, None)
 
 
 def test_prediction_rate_curve_ties_are_order_invariant():
