@@ -176,3 +176,18 @@
   - 新增测试：`tests/test_cnn2d.py`（patch<4 拒绝）、`tests/test_mode_guards.py`（MPM primary_metric+CV tuner 拒绝）、`tests/test_mpm_metrics.py`（MPM 指标不能作为 scorer）。
 - 验证：`python -m pytest -q` → **156 passed, 1 skipped, 26 subtests passed**（较上轮 153 passed 新增 3 项）。
 - 未在本批处理（需要设计决策或较大改动，详见 v7 报告）：P0-01 内部 CV 折内完整预处理隔离、P0-02 谓词开关同时切换基础损失（BCE↔MSE）的单因素化、LabelSpreading 样本权重/校准协议、面积评价输入链与真实 Bayes scorer 接通、跨分辨率研究单元对应关系与配置指纹分组。均已确认问题属实或属于实验协议缺口，保留待议。
+
+## 2026-09-07T08:44:30Z
+- 依据 `MPM-main_v8_comprehensive_audit_2026-09-07.md` 复核结论，修复经确认的 P0/P1 问题：
+  - P0-03（可学习损失混合系数退化方向）：`src/training/losses.py::weighted_mse_with_predicate` 由 `τ̂·MSE + τ·P_loss`（`τ̂=sigmoid(alpha)` 可学习）改为固定系数 `MSE + τ·P_loss`；`tau` 变为非负固定超参数，不参与梯度。`src/training/trainer.py`、`src/models/mlp.py`、`src/models/cnn.py`、`src/models/cnn2d.py` 移除 `model.alpha` 可学习参数与 `tau_init`/`learn_tau`，统一为 `tau`（默认 1.0）。新增退化方向反例测试（恒定预测下总目标不能靠削弱监督项压到近零）。
+  - P0-04（投影坐标未传到实际 GIS 算子）：`src/operators/features/builtins.py` 新增 `_unit_crs_string`，`line_distance`/`categorical_geology` 把研究单元 `attrs["crs"]` 显式传给底层 `input_crs`（无 CRS 时退回旧默认）。`tests/test_crs.py` 增加算子 CRS 透传与回退测试。
+  - P0-01（内层 CV 缺完整折内预处理隔离）：`src/features/fold_safe.py` 由「只重拟合 scaler」改为逐折完整重拟合相关性筛选 + OHE + scaler；`src/core/experiment.py` 改为保留筛选前完整特征供折内重建；`src/features/preprocess.py` 记录 `unit_columns` 与筛选前完整列。`tests/test_fold_safe.py` 重写为验证折内 OHE 类别隔离（验证折专属类别映射为全零而非 1）。
+  - P1-05（单类主训练崩溃 + 有效折统计不准确）：`src/core/contracts.py::validate_training_data` 在主训练前检查类别数≥2、特征有限、权重非负有限且总量>0；`src/core/experiment.py` 在 `tuner.fit` 前调用并在逐指标 CV 计数中区分「成功计算/有限标量/缺失」并排除 NaN/Inf。
+  - P1-06（跨运行汇总混算不同实验）：`scripts/aggregate_runs.py` 增加实验指纹（剔除 output_dir/seed）、按指纹+primary_metric 分组、`_discover_run_dirs` 按规范路径去重、每组报告 `n_seeds`。
+  - P1-07（外部算子跨运行串用）：`src/operators/features/context.py` 改为按确切文件路径 + 独立模块名（路径哈希）加载 `lib_mpm`，同一进程多个 root 不再复用首个模块。
+  - P1-08（GeoTIFF CRS 错误输入可漏过）：`src/tasks/target_area.py` 新增 `_build_spatial_reference`，用 `SetFromUserInput` 统一解析 EPSG/WKT/PROJ 并校验返回码。
+  - P1-03（知识「访问」≠「使用」）：`src/predicates/builtins.py::SpatialBoxPredicate` 仅在 `auto_center`/`auto_side` 为真时读取 `spatial_extent`，手动指定参数不再把知识记为已消费。
+  - P1-04（LabelSpreading 权重/校准协议）：`src/models/label_spreading.py` 记录 `calibration_executed_`/`calibration_skipped_reason_`；`_fit_platt` 增加类别多样性检查；非均匀 `sample_weight` 被忽略时记录 `sample_weight_ignored_` 并告警。
+  - P1-01（SPE 与原算法不一致）：`src/models/spe.py` 文档明确标注为自定义变体（等人数分箱 + `w_j=1/(1+alpha*j)`），区别于 ICDE 2020 平均硬度分箱 + `1/(h_j+alpha)`，要求论文分列报告。
+  - 第 7 节局部问题：`src/validation/splitters.py` 注册 `none` splitter（使 `cross_validation.name=none` 可配置），`src/core/config.py` 拒绝 `none` 与 CV 调参器组合；`src/utils/logging.py` 新增 `close_logging`，`src/core/experiment.py::run` 在 finally 中释放 FileHandler 句柄（修复 Windows 目录清理 WinError 32）。
+- 验证：`python -m pytest -q` → 176 passed, 1 skipped（较基线 156 passed 新增 20 项测试，覆盖上述修复）。

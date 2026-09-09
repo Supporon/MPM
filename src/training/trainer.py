@@ -79,7 +79,7 @@ class TorchTrainingLoop:
 
     模型要求:
     - model.forward(x) 返回 logits
-    - 谓词模式下 model.alpha 必须是 nn.Parameter（用于 tau 计算）
+    - 谓词模式的约束系数 ``tau`` 由调用方作为固定超参数传入（见 ``fit`` 的 ``tau`` 参数）
     """
 
     @staticmethod
@@ -92,6 +92,7 @@ class TorchTrainingLoop:
         sample_weight: np.ndarray | None = None,
         constraints: Mapping[str, Any] | None = None,
         criterion: "nn.Module | None" = None,
+        tau: float = 0.0,
         logger: Any = None,
     ) -> None:
         """在 model 上就地训练。
@@ -104,6 +105,7 @@ class TorchTrainingLoop:
             sample_weight: 样本权重，shape (n_samples,)。
             constraints: 谓词约束字典，包含 phi_vector(s)。
             criterion: 标准模式下的 loss 函数（默认 BCEWithLogitsLoss）。
+            tau: 谓词约束项系数（固定，不参与优化）；仅在 constraints 非空时生效。
             logger: 可选的 logger 实例。
         """
         if not _TORCH_AVAILABLE:
@@ -214,12 +216,10 @@ class TorchTrainingLoop:
                 logits = model(batch_X).squeeze(-1)  # [B]
 
                 if has_constraints and batch_phi is not None:
-                    # LUSI 谓词模式：sigmoid 概率 → 加权 MSE
+                    # LUSI 谓词模式：sigmoid 概率 → 加权 MSE + 固定 τ·P_loss
                     pred_prob = torch.sigmoid(logits)
-                    tau_hat = torch.sigmoid(model.alpha)
-                    tau = 1 - tau_hat
                     loss_dict = weighted_mse_with_predicate(
-                        pred_prob, batch_y, batch_phi, tau_hat, tau, sample_weight=batch_w
+                        pred_prob, batch_y, batch_phi, tau, sample_weight=batch_w
                     )
                     loss = loss_dict["total"]
                 else:
@@ -269,7 +269,6 @@ class TorchTrainingLoop:
                 "disable BatchNorm for singleton batches."
             )
 
-        # 记录最终的 τ 值
+        # 记录本次使用的约束系数 τ（固定超参数，非学习所得）。
         if has_constraints and logger is not None:
-            final_tau = torch.sigmoid(model.alpha).item()
-            logger.info("Training complete. Final tau=%.4f", final_tau)
+            logger.info("Training complete. Constraint coefficient tau=%.4f", float(tau))

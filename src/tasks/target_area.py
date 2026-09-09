@@ -22,6 +22,25 @@ class TaskCapabilityError(NotImplementedError):
     """Task 缺少某项操作所需的数据或实现时抛出的异常。"""
 
 
+def _build_spatial_reference(target_crs: Any):
+    """把配置的 ``target_crs``（EPSG 整数或 WKT/PROJ 字符串）解析为 SRS。
+
+    用 GDAL 的 ``SetFromUserInput`` 统一解析并校验返回码。旧实现把字符串一律
+    当 WKT 喂给 ``ImportFromWkt``（"EPSG:xxxx"/PROJ 字符串会静默失败），且
+    ``ImportFromEPSG``/``ImportFromWkt`` 的返回码从未检查（P1-08）。
+    """
+    from osgeo import osr
+
+    srs = osr.SpatialReference()
+    user_input = target_crs if isinstance(target_crs, str) else f"EPSG:{target_crs}"
+    if srs.SetFromUserInput(user_input) != 0:
+        raise ValueError(
+            f"prediction.target_crs could not be parsed as a CRS: {target_crs!r}. "
+            "Provide an EPSG code or a valid WKT/PROJ string."
+        )
+    return srs
+
+
 @TASK_REGISTRY.decorator("target_area_prediction")
 class TargetAreaPredictionTask:
     """负责二维靶区找矿预测的研究单元与预测语义。"""
@@ -288,7 +307,6 @@ class TargetAreaPredictionTask:
             0,
             -step_y,
         ))
-        srs = osr.SpatialReference()
         target_crs = self.prediction_config.get("target_crs")
         if target_crs is None:
             raise ValueError(
@@ -296,10 +314,7 @@ class TargetAreaPredictionTask:
                 "(an EPSG integer or a WKT/proj4 string). The Lachlan/NSW archive "
                 "uses GDA94/EPSG:4283."
             )
-        if isinstance(target_crs, int):
-            srs.ImportFromEPSG(target_crs)
-        else:
-            srs.ImportFromWkt(str(target_crs))
+        srs = _build_spatial_reference(target_crs)
 
         # 导出 CRS 必须与已记录的研究单元 CRS 一致；不一致说明坐标被错误
         # 标注（或输入未统一投影）。framework 不做隐式重投影。

@@ -70,6 +70,11 @@ class BaselinePreprocessor:
         self.correlation: pd.DataFrame | None = None
         self.encoder_fitted = False
         self.scaler_fitted = False
+        # 筛选前的完整列与 unit 列，供折内隔离（FoldSafePreprocessor）逐折重建
+        # 相关性筛选 + OHE 类别；外层 preprocessor 的 unit_columns 会被复用。
+        self.unit_columns: tuple[str, ...] = ("X", "Y")
+        self._all_numerical_columns: list[str] = []
+        self._all_categorical_columns: list[str] = []
 
     def clone(self) -> "BaselinePreprocessor":
         """返回配置与种子相同、尚未拟合的新实例。"""
@@ -88,6 +93,10 @@ class BaselinePreprocessor:
         类别在验证时映射为全零。
         """
         numerical, categorical = split_feature_columns(frame, unit_columns)
+
+        self.unit_columns = tuple(unit_columns)
+        self._all_numerical_columns = list(numerical)
+        self._all_categorical_columns = list(categorical)
 
         # 相关性筛选只使用传入的 frame
         correlation = frame[numerical].corr(method="spearman").abs()

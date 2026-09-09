@@ -17,15 +17,40 @@ P1-10 的最小闭环：多种子/多配置实验结束后，用本脚本把逐 
 from __future__ import annotations
 
 import argparse
+import copy
+import hashlib
 import json
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+
+def _canonical_config(manifest: dict) -> dict:
+    """把 manifest 的 config 归一化为实验指纹输入，剔除运行特定/允许变化的字段。
+
+    剔除 ``experiment.output_dir``（运行路径）与 ``experiment.seed``（组内允许
+    变化的种子）；保留 dataset、model.params、preprocess、validation、tuning、
+    label_refinement、knowledge、predicates 等实验定义字段（P1-06）。
+    """
+    config = manifest.get("config")
+    if not isinstance(config, dict):
+        return {}
+    cfg = copy.deepcopy(config)
+    experiment = cfg.get("experiment")
+    if isinstance(experiment, dict):
+        experiment.pop("output_dir", None)
+        experiment.pop("seed", None)
+    return cfg
+
+
+def _fingerprint(manifest: dict) -> str:
+    """生成实验指纹（不含 run_id/输出路径/时间/种子）。"""
+    payload = json.dumps(_canonical_config(manifest), sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def _load_json(path: Path) -> dict | None:
@@ -47,11 +72,23 @@ def _scalar_metrics(metrics: dict) -> dict[str, float]:
 
 
 def _discover_run_dirs(runs_dir: Path | None, run_dirs: list[str]) -> list[Path]:
+    """按规范路径去重：同一目录同时通过父目录扫描与 --run 提供时只计一次。"""
     dirs: list[Path] = []
+    seen: set[Path] = set()
+
+    def add(path: Path) -> None:
+        resolved = path.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            dirs.append(path)
+
     if runs_dir is not None:
         root = Path(runs_dir)
-        dirs.extend(sorted(p for p in root.iterdir() if (p / "manifest.json").is_file()))
-    dirs.extend(Path(p) for p in run_dirs)
+        for p in sorted(root.iterdir()):
+            if (p / "manifest.json").is_file():
+                add(p)
+    for p in run_dirs:
+        add(Path(p))
     return dirs
 
 
@@ -77,6 +114,7 @@ def _collect(run_dirs: list[Path]) -> list[dict]:
             "status": manifest.get("status"),
             "primary_metric": primary_metric,
             "primary_value": scalars.get(primary_metric) if primary_metric else None,
+            "fingerprint": _fingerprint(manifest),
         }
         row.update(scalars)
         failure = manifest.get("failure")
@@ -96,17 +134,21 @@ def _summarize(rows: list[dict]) -> pd.DataFrame:
         return pd.DataFrame()
 
     frame = pd.DataFrame(completed)
-    group_keys = ["experiment", "variant", "execution_mode", "model", "tuner"]
+    # 分组键加入实验指纹与 primary_metric：不同数据/标签/特征/划分/模型参数/
+    # 评分协议的同名运行不再混组；仅允许 seed 变化（指纹已剔除 seed）在同一组。
+    group_keys = ["experiment", "variant", "execution_mode", "model", "tuner",
+                  "primary_metric", "fingerprint"]
     # 每个分组内至少 2 个值才统计 mean±std。
     numeric_cols = [
         col for col in frame.columns
-        if col not in group_keys + ["run_id", "output_dir", "status", "primary_metric",
+        if col not in group_keys + ["run_id", "output_dir", "status",
                                     "failure_type", "failure_message", "seed"]
     ]
     summaries = []
     for keys, group in frame.groupby(group_keys, dropna=False):
         base = dict(zip(group_keys, keys))
         base["n_runs"] = int(len(group))
+        base["n_seeds"] = int(group["seed"].nunique())
         for col in numeric_cols:
             series = group[col].dropna()
             if len(series) >= 2:

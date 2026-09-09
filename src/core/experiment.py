@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ..utils.logging import get_logger, setup_logging
+from ..utils.logging import close_logging, get_logger, setup_logging
 from ..data.dataset import ArchiveDataset, DatasetRepository
 from ..features.preprocess import BaselinePreprocessor
 from ..knowledge.pipeline import KnowledgePipeline
@@ -36,7 +36,7 @@ from ..validation.metrics import evaluate_classifier
 from ..validation.splitters import create_holdout
 from .bootstrap import load_builtin_components
 from .config import ExperimentConfig
-from .contracts import SplitData, TrainingData
+from .contracts import SplitData, TrainingData, validate_training_data
 
 
 class _KnowledgeAccessTracker(dict):
@@ -367,14 +367,11 @@ class Experiment:
             with preprocessor_path.open("wb") as handle:
                 pickle.dump(self.preprocessor, handle)
             self.output_files.append(preprocessor_path)
-            # 保留未变换的外层训练折特征（仅预处理器实际使用的列），供带内层
-            # CV 的 tuner（如 bayes）逐 fold 重拟合 scaler，避免验证折参与缩放
-            # 统计（P0-03 折内隔离）。
-            raw_columns = list(self.preprocessor.numerical_columns) + list(
-                self.preprocessor.categorical_columns
-            )
+            # 保留未变换的**筛选前完整**训练折特征，供带内层 CV 的 tuner（如
+            # bayes）逐 fold 重拟合相关性筛选 + OHE + scaler，避免验证折参与
+            # 任何学习型预处理统计（P0-01 折内隔离）。
             raw_training = TrainingData(
-                train_split.features[raw_columns].reset_index(drop=True),
+                train_split.features.reset_index(drop=True),
                 train_split.labels.reset_index(drop=True),
                 train_split.sample_weight.reset_index(drop=True),
                 metadata={"units": train_split.metadata["units"].reset_index(drop=True)},
@@ -412,6 +409,10 @@ class Experiment:
             )
         if self._injection_audit is not None:
             self._injection_audit["constraints_consumed"] = bool(training.constraints)
+        # 主训练前的类别/数值/权重契约检查：单类训练集、非有限特征或非法权重
+        # 会让后续 predict_proba[:,1] / 指标计算崩溃；在此显式拒绝（P1-05），
+        # 而非等到 evaluate 阶段才抛 IndexError。
+        validate_training_data(training)
         tuner = TUNER_REGISTRY.create(self.spec.tuner.name)
         # 折内隔离仅在「raw_gis + 内层 CV」时启用；PUB 标签细化与内层 CV 的组合
         # 已在配置层拒绝，故这里 raw_training 与 label_refinement 不会同时出现。
@@ -711,16 +712,23 @@ class Experiment:
 
         evaluated_folds = [f for f in folds if not f.get("skipped")]
         aggregate: dict[str, Any] = {}
-        # 逐指标有效折数：AUC/AP 等在单类验证折上返回 None，仅按「完成拟合」
-        # 计数会高估有效折数。这里分别记录每个指标有多少折给出标量值，让
-        # None 聚合可解释（P1-01）。
+        # 逐指标有效折数：区分「指标成功计算（非 None）」与「可聚合为有限标量」。
+        # AUC/AP 在单类验证折上返回 None，而 confusion_matrix 返回 list（成功计算
+        # 但不是标量）；仅按「完成拟合」计数会高估有效折数，仅按「是标量」会把
+        # 成功算出的矩阵误记为缺失。这里分开记录，并把 NaN/Inf 视为无效（P1-05）。
+        metric_computed_folds: dict[str, int] = {}
         metric_valid_folds: dict[str, int] = {}
         metric_missing_folds: dict[str, int] = {}
         for name in self.spec.metrics:
             values = [f["metrics"].get(name) for f in evaluated_folds]
-            scalars = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+            computed = [v for v in values if v is not None]
+            scalars = [
+                v for v in computed
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and np.isfinite(v)
+            ]
+            metric_computed_folds[name] = len(computed)
             metric_valid_folds[name] = len(scalars)
-            metric_missing_folds[name] = len(evaluated_folds) - len(scalars)
+            metric_missing_folds[name] = len(evaluated_folds) - len(computed)
             if scalars:
                 aggregate[name] = {
                     "mean": float(np.mean(scalars)),
@@ -758,6 +766,7 @@ class Experiment:
             "n_splits": len(folds),
             "n_valid_folds": len(evaluated_folds),
             "n_skipped_folds": len(folds) - len(evaluated_folds),
+            "metric_computed_folds": metric_computed_folds,
             "metric_valid_folds": metric_valid_folds,
             "metric_missing_folds": metric_missing_folds,
             "model_params_source": (
@@ -1009,7 +1018,11 @@ class Experiment:
             except Exception:
                 self._log.exception("Failed to persist failure manifest")
             raise
-
-        manifest = self.export()
-        self._log.info("Experiment '%s' complete. Output: %s", self.spec.name, self.output_dir)
-        return manifest
+        else:
+            manifest = self.export()
+            self._log.info("Experiment '%s' complete. Output: %s", self.spec.name, self.output_dir)
+            return manifest
+        finally:
+            # 释放本次运行的 FileHandler 文件句柄，避免 Windows 下输出目录
+            # （如 TemporaryDirectory）清理时 WinError 32（第 7 节日志生命周期）。
+            close_logging()

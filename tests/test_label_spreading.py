@@ -47,3 +47,24 @@ def test_calibration_folds_adapt_to_minority_class():
     # 正例仅 1 个，无法分层切分，校准折数降为 0（跳过校准，返回原软分数）。
     assert model.cv_folds_ == 0
     assert model.predict_proba(None).shape == (36, 2)
+    # 校准未实际执行，且原因被显式记录（P1-04）。
+    assert model.calibration_executed_ is False
+    assert model.calibration_skipped_reason_ is not None
+
+
+def test_non_uniform_sample_weight_is_recorded_as_ignored():
+    """P1-04: 非均匀 sample_weight 被传入但图模型不消费，应显式记录而非静默。"""
+    grid, inside = _small_grid()
+    X = np.random.default_rng(0).normal(size=(6, 2))
+    y = np.array([1, 0, 1, 0, 1, 0])
+    cells = np.array([[0, 0], [1, 1], [2, 2], [3, 3], [4, 4], [5, 5]])
+    sw = np.array([100.0, 0.0, 0.001, 2.0, 1.0, 1.0])
+
+    import warnings
+
+    model = LabelSpreadingClassifier(calibrate=False, random_state=0)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(X, y, sample_weight=sw, grid=grid, inside=inside, train_cells=cells)
+    assert model.sample_weight_ignored_ is True
+    assert any("sample_weight" in str(w.message) for w in caught)

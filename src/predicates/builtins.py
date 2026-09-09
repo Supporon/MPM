@@ -186,12 +186,15 @@ class SpatialBoxPredicate:
         y_coords = coords[:, 1]
 
         # 优先从知识上下文消费 spatial_extent 的研究区域先验范围，
-        # 否则回退到从当前数据坐标重新估计。
+        # 否则回退到从当前数据坐标重新估计。仅在需要自动计算中心/边长时读取
+        # 知识：手动指定 auto_center=False 且 auto_side=False 时，知识不影响 phi，
+        # 不应把 knowledge 记为已消费（P1-03：accessed 与 used 语义区分）。
         extent = None
-        knowledge = context.get("knowledge", {})
-        spatial_knowledge = knowledge.get("spatial_extent", {})
-        if isinstance(spatial_knowledge, Mapping) and "bounds" in spatial_knowledge:
-            extent = spatial_knowledge
+        if self.auto_center or self.auto_side:
+            knowledge = context.get("knowledge", {})
+            spatial_knowledge = knowledge.get("spatial_extent", {})
+            if isinstance(spatial_knowledge, Mapping) and "bounds" in spatial_knowledge:
+                extent = spatial_knowledge
 
         # 自动计算中心和边长
         if self.auto_center:

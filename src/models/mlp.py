@@ -7,12 +7,20 @@
 Invariants），实现形式参考 TSIL。
 
 LUSI 加权损失：
-    loss = τ̂ · MSE + τ · (1/N) · (φ̃ᵀ e)²
+    loss = MSE + τ · (1/N) · (φ̃ᵀ e)²
 
 其中 φ̃ 是 L2 归一化后的谓词描述向量，e = sigmoid(logits) - target 是
-概率残差向量。τ̂ + τ = 1，τ 通过可学习参数 α 经 sigmoid 得到。
+概率残差向量。τ 是**固定**的谓词（统计不变量）项系数，由配置作为超参数
+传入，不参与梯度优化（P0-03：早期可学习系数存在降低监督项的退化方向）。
 
 当没有谓词约束时，使用标准的 BCEWithLogitsLoss 进行二分类训练。
+
+.. note::
+    基础损失在「无谓词」与「有谓词」两分支不同（BCE vs sigmoid-MSE）。因此
+    「baseline → +predicate」同时改变了基础损失、权重归一化与约束项等多个因素，
+    不能把性能差异全部归因为地质知识（P0-02）。做单因素归因时，应至少包含
+    BCE baseline、MSE baseline、MSE+predicate 三组对照，并固定优化器、训练
+    预算与数据划分，仅切换约束项。
 """
 
 from __future__ import annotations
@@ -113,10 +121,6 @@ if _TORCH_AVAILABLE:
             layers.append(nn.Linear(in_dim, 1))
             self.net = nn.Sequential(*layers)
 
-            # 可学习的 τ 参数（控制 P 矩阵权重）
-            # α 初始化为 0 → sigmoid(0) = 0.5 → τ̂ = 0.5, τ = 0.5
-            self.alpha = nn.Parameter(torch.tensor(0.0))
-
         def forward(self, x: "torch.Tensor") -> "torch.Tensor":
             """前向传播。
 
@@ -160,10 +164,8 @@ class MLPClassifier(BaseEstimator, ClassifierMixin):
         Dropout 比率，默认 0.3。
     use_batch_norm : bool
         是否使用 BatchNorm，默认 True。
-    tau_init : float
-        τ 初始值（P 矩阵权重），范围 [0, 1]，默认 0.5。
-    learn_tau : bool
-        τ 是否可学习，默认 True。
+    tau : float
+        谓词（统计不变量）项系数，固定不参与优化，默认 1.0。
     random_state : int or None
         随机种子。
     device : str
@@ -188,8 +190,7 @@ class MLPClassifier(BaseEstimator, ClassifierMixin):
         weight_decay: float = 1e-4,
         dropout: float = 0.3,
         use_batch_norm: bool = True,
-        tau_init: float = 0.5,
-        learn_tau: bool = True,
+        tau: float = 1.0,
         random_state: int | None = None,
         dataloader_seed: int | None = None,
         device: str = "cpu",
@@ -201,8 +202,7 @@ class MLPClassifier(BaseEstimator, ClassifierMixin):
         self.weight_decay = weight_decay
         self.dropout = dropout
         self.use_batch_norm = use_batch_norm
-        self.tau_init = tau_init
-        self.learn_tau = learn_tau
+        self.tau = float(tau)
         self.random_state = random_state
         self.dataloader_seed = dataloader_seed
         self.device = device
@@ -258,14 +258,6 @@ class MLPClassifier(BaseEstimator, ClassifierMixin):
         )
         self.model_.to(self.device)
 
-        # 设置 τ 初始值
-        if not self.learn_tau:
-            self.model_.alpha.requires_grad_(False)
-        import math
-        tau_clamped = max(0.01, min(0.99, self.tau_init))
-        with torch.no_grad():
-            self.model_.alpha.fill_(math.log(tau_clamped / (1 - tau_clamped)))
-
         # 委托给共享训练循环
         from ..training.trainer import TorchTrainingConfig, TorchTrainingLoop
 
@@ -273,7 +265,7 @@ class MLPClassifier(BaseEstimator, ClassifierMixin):
             "phi_vector" in constraints or "phi_vectors" in constraints
         )
         if has_constraints:
-            log.info("Using predicate constraints for weighted MSE loss")
+            log.info("Using predicate constraints for weighted MSE loss (tau=%.4f)", self.tau)
         else:
             log.info("No predicate constraints, using standard BCEWithLogitsLoss")
 
@@ -293,6 +285,7 @@ class MLPClassifier(BaseEstimator, ClassifierMixin):
             training_config,
             sample_weight=sample_weight,
             constraints=constraints,
+            tau=self.tau if has_constraints else 0.0,
             logger=log,
         )
 
@@ -350,8 +343,7 @@ class MLPClassifier(BaseEstimator, ClassifierMixin):
             "weight_decay": self.weight_decay,
             "dropout": self.dropout,
             "use_batch_norm": self.use_batch_norm,
-            "tau_init": self.tau_init,
-            "learn_tau": self.learn_tau,
+            "tau": self.tau,
             "random_state": self.random_state,
             "dataloader_seed": self.dataloader_seed,
             "device": self.device,
@@ -457,9 +449,9 @@ class MLPAdapter:
         for dim in hidden_layers:
             if not isinstance(dim, int) or dim < 1:
                 raise ValueError(f"mlp hidden layer dimension must be positive, got {dim}")
-        tau_init = float(params.get("tau_init", 0.5))
-        if not 0 < tau_init < 1:
-            raise ValueError("mlp tau_init must be in (0, 1)")
+        tau = float(params.get("tau", 1.0))
+        if tau < 0:
+            raise ValueError("mlp tau must be non-negative")
 
     def build(self, params: Mapping[str, Any], seed: int) -> MLPClassifier:
         """根据配置参数构建 MLPClassifier 实例。
@@ -485,8 +477,7 @@ class MLPAdapter:
             weight_decay=float(resolved.get("weight_decay", 1e-4)),
             dropout=float(resolved.get("dropout", 0.3)),
             use_batch_norm=bool(resolved.get("use_batch_norm", True)),
-            tau_init=float(resolved.get("tau_init", 0.5)),
-            learn_tau=bool(resolved.get("learn_tau", True)),
+            tau=float(resolved.get("tau", 1.0)),
             random_state=seed,
             dataloader_seed=(
                 int(params["dataloader_seed"])

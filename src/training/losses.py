@@ -5,13 +5,13 @@
 
 提供所有深度学习模型可复用的谓词约束损失函数：
 - φ 向量 L2 归一化
-- LUSI 加权 MSE 损失（τ̂·MSE + τ·P_loss）
+- LUSI 加权 MSE 损失（MSE + τ·P_loss，τ 为固定约束系数）
 - 从 TrainingData constraints 构建合并的 φ 向量
 
 数学原理（Vapnik & Izmailov 的 LUSI；实现参考 TSIL）:
     φ 向量 → L2 归一化 φ̃ = φ / ||φ||
     P = φ̃ φ̃ᵀ（投影矩阵）
-    loss = τ̂ · MSE + τ · (1/N) · ||φ̃ᵀ e||²
+    loss = MSE + τ · (1/N) · ||φ̃ᵀ e||²
 
 P 矩阵将具有相似谓词特征的样本聚合在一起，在损失计算中引入
 样本间的统计不变量。
@@ -41,29 +41,35 @@ def weighted_mse_with_predicate(
     pred: "torch.Tensor",
     target: "torch.Tensor",
     phi: "torch.Tensor",
-    tau_hat: "torch.Tensor",
-    tau: "torch.Tensor",
+    tau: float,
     sample_weight: "torch.Tensor | None" = None,
 ) -> dict[str, "torch.Tensor"]:
-    """LUSI 谓词约束加权 MSE 损失。
+    """LUSI 谓词约束加权 MSE 损失（固定约束系数）。
 
     数学形式：
-        loss = τ̂ · MSE + τ · (1/N) · (φ̃ᵀ e)²
+        loss = MSE + τ · (1/N) · (φ̃ᵀ e)²
 
     其中 P_loss = (1/N) · (φ̃ᵀ e)² 等价于 (1/N) · eᵀ P e，
     P = φ̃ φ̃ᵀ 是投影矩阵。``sample_weight`` 应用于个体误差项 MSE。
+
+    ``tau`` 是**固定的**谓词（统计不变量）项系数，由调用方作为超参数传入，
+    不参与梯度优化。早期实现把约束系数做成可学习参数 ``sigmoid(alpha)``，
+    由于约束项 ``P_loss ≤ MSE``（对等权样本、归一化谓词），梯度下降倾向
+    通过减小监督项系数来降低总目标，而非改善预测（P0-03 退化方向）；固定
+    系数消除了这一退化方向，使 lambda=0 与有谓词分支的监督项完全一致。
 
     Args:
         pred: 预测概率值（已通过 sigmoid），shape [N]
         target: 目标值，shape [N]
         phi: 谓词描述向量，shape [N] 或 [N, d]
-        tau_hat: I 项权重（保留个体误差）
-        tau: P 项权重（统计不变量）
+        tau: 谓词项系数（统计不变量权重），>= 0，固定不参与优化
         sample_weight: 逐样本权重，shape [N]；None 表示等权。
 
     Returns:
         dict with 'total', 'mse', 'v_loss', 'p_loss', 'p_loss_raw'
     """
+    if tau < 0:
+        raise ValueError(f"tau must be non-negative, got {tau}")
     e = pred - target  # [N]
     N = e.shape[0]
 
@@ -82,7 +88,7 @@ def weighted_mse_with_predicate(
     phi_T_e = torch.mv(phi_norm.T, e)  # [d]
     p_loss_raw = (phi_T_e**2).sum() / N
 
-    v_loss = tau_hat * mse
+    v_loss = mse
     p_term = tau * p_loss_raw
     total = v_loss + p_term
 

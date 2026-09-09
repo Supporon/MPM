@@ -5,11 +5,37 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, Protocol
 
+import numpy as np
 import pandas as pd
 
 
 class OptionalDependencyError(RuntimeError):
     """所选组件依赖尚未安装的可选依赖时抛出的异常。"""
+
+
+def validate_training_data(data: "TrainingData") -> None:
+    """主训练/调参前的类别与数值契约检查（P1-05）。
+
+    单类训练集、非有限特征、非法权重都会让后续 ``predict_proba[:, 1]`` 或
+    指标计算崩溃/产生无意义结果；在进入训练前显式拒绝，而不是在评估阶段抛
+    ``IndexError``。空间留区或稀少矿点留下单类训练集时应报告不可评价。
+    """
+    labels = data.labels.to_numpy()
+    classes = np.unique(labels)
+    if len(classes) < 2:
+        raise ValueError(
+            f"training set is single-class (classes={classes.tolist()}); cannot fit a "
+            "binary classifier or produce a two-column predict_proba. Check the "
+            "holdout/split configuration or provide more labeled positives."
+        )
+    numeric = data.features.select_dtypes(include=[np.number])
+    if numeric.shape[1] and not np.all(np.isfinite(numeric.to_numpy())):
+        raise ValueError("training features contain non-finite values (NaN/inf).")
+    weights = data.sample_weight.to_numpy(dtype=float)
+    if np.any(~np.isfinite(weights)) or np.any(weights < 0):
+        raise ValueError("sample weights must be finite and non-negative.")
+    if weights.sum() <= 0:
+        raise ValueError("sample weights sum to zero; no effective training signal.")
 
 
 @dataclass(frozen=True)

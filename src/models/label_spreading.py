@@ -67,14 +67,21 @@ class LabelSpreadingClassifier(BaseEstimator, ClassifierMixin):
         return grid_map
 
     def _fit_platt(self, scores, y):
-        """用 (scores, y) 拟合 Platt 校准器：sigmoid(a·score + b)。"""
+        """用 (scores, y) 拟合 Platt 校准器：sigmoid(a·score + b)。
+
+        除样本数量外还检查类别多样性：valid OOF 只剩单类时 LogisticRegression
+        无法拟合二分类校准器，此时返回 None（P1-04）。
+        """
         from sklearn.linear_model import LogisticRegression
 
         mask = ~np.isnan(scores)
         if mask.sum() < 2:
             return None
+        y_valid = np.asarray(y)[mask]
+        if len(np.unique(y_valid)) < 2:
+            return None
         self.platt_ = LogisticRegression(C=1.0, solver="lbfgs")
-        self.platt_.fit(scores[mask].reshape(-1, 1), y[mask])
+        self.platt_.fit(scores[mask].reshape(-1, 1), y_valid)
         return self.platt_
 
     def _calibrate(self, scores):
@@ -96,11 +103,39 @@ class LabelSpreadingClassifier(BaseEstimator, ClassifierMixin):
         # 全量 LabelSpreading → 网格软分数
         grid_map_raw = self._run_ls(X, y, grid_arr, inside_2d)
 
+        # 记录 sample_weight 是否被传入但忽略：图模型与校准器均不消费权重，
+        # 加权实验不能看起来已经生效（P1-04）。
+        sw = np.asarray(sample_weight, dtype=float) if sample_weight is not None else None
+        self.sample_weight_ignored_ = bool(
+            sw is not None and len(sw) > 0 and not np.allclose(sw, sw[0])
+        )
+        if self.sample_weight_ignored_:
+            import warnings
+
+            warnings.warn(
+                "label_spreading does not support sample_weight; the configured "
+                "sample weights are ignored by the graph model and the calibration "
+                "step. Use unweighted comparisons for this model.",
+                UserWarning,
+                stacklevel=2,
+            )
+
         self.platt_ = None
+        self.calibration_executed_ = False
+        self.calibration_skipped_reason_ = None
         if self.calibrate:
             # CV out-of-fold 分数拟合 Platt
             oof = self._out_of_fold_scores(X, y, grid_arr, inside_2d, train_cells)
-            self._fit_platt(oof, y)
+            if self._fit_platt(oof, y) is not None:
+                self.calibration_executed_ = True
+            else:
+                self.calibration_skipped_reason_ = (
+                    "insufficient valid OOF samples or classes for Platt scaling; "
+                    "falling back to raw propagation scores."
+                )
+                self.platt_ = None
+        else:
+            self.calibration_skipped_reason_ = "calibrate=False"
 
         # 应用校准（若未校准则用原软分数）
         raw_vals = grid_map_raw[inside_2d]

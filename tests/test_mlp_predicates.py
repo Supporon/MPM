@@ -115,7 +115,7 @@ def test_mlp_config_validation():
 
     adapter.validate_config({
         "n_epochs": 10, "batch_size": 32, "learning_rate": 1e-3,
-        "dropout": 0.3, "hidden_layers": [64, 32], "tau_init": 0.5,
+        "dropout": 0.3, "hidden_layers": [64, 32], "tau": 0.5,
     })
     print("  ✓ 有效配置校验通过")
 
@@ -123,7 +123,7 @@ def test_mlp_config_validation():
         ({"n_epochs": 0}, "n_epochs=0"),
         ({"dropout": 1.0}, "dropout=1.0"),
         ({"hidden_layers": []}, "空的 hidden_layers"),
-        ({"tau_init": 0.0}, "tau_init=0.0"),
+        ({"tau": -1.0}, "tau=-1.0"),
     ]:
         try:
             adapter.validate_config(bad)
@@ -168,10 +168,9 @@ def test_weighted_mse_math():
     pred = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
     target = torch.tensor([0.0, 1.0, 2.0], dtype=torch.float64)
     phi = torch.tensor([1.0, 1.0, 1.0], dtype=torch.float64)
-    tau_hat = torch.tensor(0.5, dtype=torch.float64)
-    tau = torch.tensor(0.5, dtype=torch.float64)
+    tau = 0.5  # 固定谓词项系数
 
-    result = weighted_mse_with_predicate(pred, target, phi, tau_hat, tau)
+    result = weighted_mse_with_predicate(pred, target, phi, tau)
 
     e = pred - target
     N = 3
@@ -184,8 +183,31 @@ def test_weighted_mse_math():
         f"mse: {result['mse'].item()} vs {mse_expected}"
     assert abs(result["p_loss_raw"].item() - p_loss_raw_expected) < 1e-5, \
         f"p_loss_raw: {result['p_loss_raw'].item()} vs {p_loss_raw_expected}"
-    assert abs(result["total"].item() - (0.5 * mse_expected + 0.5 * p_loss_raw_expected)) < 1e-5
+    assert abs(result["total"].item() - (mse_expected + tau * p_loss_raw_expected)) < 1e-5
     print("  ✓ 加权 MSE 损失数学正确性验证通过")
+
+
+def test_fixed_tau_no_degradation_direction():
+    """P0-03: 固定系数下，恒定预测不能靠降低监督项系数把总目标压到近零。
+
+    早期可学习系数 s=sigmoid(alpha) 时，L=s·MSE+(1-s)·P_loss，P_loss≤MSE，
+    梯度下降可减小 s 使 L 趋零而预测不变。固定 tau 后 L=MSE+tau·P_loss，
+    tau 不参与优化，不存在该退化方向。
+    """
+    import torch
+
+    y = torch.tensor([0.0, 1.0], dtype=torch.float64)
+    pred = torch.tensor([0.5, 0.5], dtype=torch.float64)
+    phi = torch.tensor([1.0, 1.0], dtype=torch.float64)
+
+    result = weighted_mse_with_predicate(pred, y, phi, tau=0.0)
+    # 恒定预测下 MSE=0.25；tau=0 时总目标应等于 MSE（不能被压到近零）。
+    assert abs(result["mse"].item() - 0.25) < 1e-9
+    assert abs(result["total"].item() - 0.25) < 1e-9
+    # tau 是固定标量，不随训练改变。
+    with pytest.raises(ValueError):
+        weighted_mse_with_predicate(pred, y, phi, tau=-1.0)
+    print("  ✓ 固定系数消除退化方向")
 
 
 def test_phi_normalization():
@@ -212,8 +234,7 @@ def test_mlp_with_all_ones_predicate():
         n_epochs=50,
         batch_size=64,
         learning_rate=1e-3,
-        tau_init=0.5,
-        learn_tau=True,
+        tau=1.0,
         random_state=42,
         device="cpu",
     )
@@ -223,10 +244,9 @@ def test_mlp_with_all_ones_predicate():
     accuracy = np.mean(pred == y)
     assert accuracy > 0.55, f"Accuracy too low: {accuracy:.3f}"
 
-    import torch
-    final_tau = torch.sigmoid(model.model_.alpha).item()
-    assert 0.0 < final_tau < 1.0
-    print(f"  ✓ MLP + 全 1 谓词训练成功 (accuracy={accuracy:.3f}, final_tau={final_tau:.4f})")
+    assert model.tau == 1.0
+    assert not any("alpha" in name for name, _ in model.model_.named_parameters())
+    print(f"  ✓ MLP + 全 1 谓词训练成功 (accuracy={accuracy:.3f}, tau={model.tau:.2f})")
 
 
 def test_mlp_with_spatial_box_predicate():
@@ -249,8 +269,7 @@ def test_mlp_with_spatial_box_predicate():
         n_epochs=50,
         batch_size=64,
         learning_rate=1e-3,
-        tau_init=0.5,
-        learn_tau=True,
+        tau=1.0,
         random_state=42,
         device="cpu",
     )
@@ -274,8 +293,7 @@ def test_mlp_with_multi_predicate():
         n_epochs=50,
         batch_size=64,
         learning_rate=1e-3,
-        tau_init=0.5,
-        learn_tau=True,
+        tau=1.0,
         random_state=42,
         device="cpu",
     )

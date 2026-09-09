@@ -14,6 +14,30 @@ from ..core.contracts import SplitData, TrainingData
 from .registry import SPLITTER_REGISTRY
 
 
+@SPLITTER_REGISTRY.decorator("none")
+class NoCrossValidationSplitter:
+    """禁用独立评价 CV 的占位 splitter。
+
+    ``Experiment._run_independent_cv`` 在 ``cross_validation.name == "none"`` 时
+    直接跳过，本 splitter 仅用于让 ``validate_config`` 的 ``require`` 通过，避免
+    文档承诺的关闭选项在配置层被拒绝（第 7 节局部功能缺口）。任何需要真实 CV
+    对象的调用（如 ``bayes`` 调参器）都应在配置层与 ``none`` 组合被拒绝，或在
+    此处得到明确错误。
+    """
+
+    kind = "cross_validation"
+
+    @staticmethod
+    def validate_config(params: Mapping[str, Any]) -> None:
+        pass
+
+    def build_cv(self, params: Mapping[str, Any], seed: int, data: TrainingData | None = None):
+        raise ValueError(
+            "cross_validation.name='none' disables cross-validation; no CV splitter "
+            "can be built. Do not combine it with a CV-based tuner."
+        )
+
+
 @SPLITTER_REGISTRY.decorator("random_holdout")
 class RandomHoldoutSplitter:
     kind = "holdout"

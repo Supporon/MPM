@@ -577,6 +577,17 @@ def _validate_mode_capabilities(config: Mapping[str, Any]) -> None:
                 "train_cells metadata cannot be sliced per fold. Use tuning.name=none."
             )
 
+    # CV 调参器需要真实的 CV 对象；cross_validation.name='none' 禁用 CV，
+    # 二者组合会在 tuner.fit 内 build_cv('none') 时失败。配置层提前拒绝。
+    if config["validation"]["cross_validation"]["name"] == "none":
+        tuner = TUNER_REGISTRY.get(config["tuning"]["name"])
+        if getattr(tuner, "uses_cross_validation", False):
+            raise ConfigError(
+                f"validation.cross_validation.name='none' disables cross-validation, "
+                f"but tuner {config['tuning']['name']!r} uses it. Set tuning.name=none "
+                "or provide a real cross-validation splitter."
+            )
+
     # MPM 面积捕获指标需要 unit_area，无法作为内层 CV 的评分函数；若作为
     # primary_metric 配给 CV 调参器，评分器每次调用都会抛错。配置层提前拒绝，
     # 与 build_metric_scorer 的运行时守卫保持一致（P1-03）。

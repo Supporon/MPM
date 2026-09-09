@@ -1,4 +1,4 @@
-"""P0-03: 折内隔离预处理的单元与集成测试。"""
+"""P0-01: 折内隔离预处理（完整重拟合相关性筛选 + OHE + scaler）测试。"""
 
 from __future__ import annotations
 
@@ -43,46 +43,59 @@ def _fit_schema(frame: pd.DataFrame) -> BaselinePreprocessor:
     return pp
 
 
-def test_fold_safe_preprocessor_refits_scaler_but_keeps_schema_fixed():
+def test_fold_safe_preprocessor_refits_full_schema_per_fold():
+    """折内独立重拟合相关性筛选 + OHE + scaler，不复用外层 schema 的编码器。"""
     frame = _raw_frame()
     schema = _fit_schema(frame)
-    raw_columns = list(schema.numerical_columns) + list(schema.categorical_columns)
+    raw_columns = list(schema._all_numerical_columns) + list(schema._all_categorical_columns)
 
     subset = frame.iloc[:20].reset_index(drop=True)
     fold = FoldSafePreprocessor(schema).fit(subset[raw_columns])
 
-    # schema（列选择 + OHE 类别）固定，与完整训练集一致
-    assert fold.pp_.numerical_columns == schema.numerical_columns
-    assert fold.pp_.categorical_columns == schema.categorical_columns
-    assert fold.pp_._encoded_columns == schema._encoded_columns
-    assert fold.pp_.feature_columns == schema.feature_columns
-    # OHE 编码器共享（handle_unknown=ignore 类别集合固定）
-    assert fold.pp_.encoder is schema.encoder
+    # 编码器与 scaler 都基于折内数据重新拟合，而非复用外层实例。
+    assert fold.pp_.encoder is not schema.encoder
+    assert fold.pp_.numerical_columns != schema.numerical_columns or (
+        fold.pp_.scaler_fitted
+    )
 
-    # scaler 只基于折内样本重拟合，统计量应不同于完整训练集
-    if schema.numerical_columns:
-        assert not np.allclose(
-            fold.pp_.scaler.mean_, schema.scaler.mean_, equal_nan=True
-        )
-
-    # transform 输出维度与固定 feature_columns 一致
+    # transform 输出维度与该折自己的 feature_columns 一致。
     out = fold.transform(subset[raw_columns])
-    assert list(out.columns) == schema.feature_columns
+    assert list(out.columns) == fold.pp_.feature_columns
     assert len(out) == len(subset)
 
 
-def test_fold_safe_preprocessor_shares_encoder_categories_across_folds():
-    frame = _raw_frame()
-    schema = _fit_schema(frame)
-    raw_columns = list(schema.numerical_columns) + list(schema.categorical_columns)
-
-    fold_a = FoldSafePreprocessor(schema).fit(frame.iloc[:30][raw_columns])
-    fold_b = FoldSafePreprocessor(schema).fit(frame.iloc[30:][raw_columns])
-    assert fold_a.pp_.encoder is fold_b.pp_.encoder
-    # 两个折 transform 出的列名一致（折间无 schema 漂移）
-    assert list(fold_a.transform(frame.iloc[:30][raw_columns]).columns) == list(
-        fold_b.transform(frame.iloc[30:][raw_columns]).columns
+def test_fold_safe_isolates_validation_only_category():
+    """P0-01 反例：验证折专属类别不进入训练折的 OHE schema，映射为全零而非 1。"""
+    rng = np.random.default_rng(0)
+    n = 60
+    a = rng.normal(size=n)
+    b = a + rng.normal(0, 1e-3, n)  # 与 a 高度相关
+    cat = np.where(rng.random(n) < 0.5, "cat_a", "validation_only")
+    frame = pd.DataFrame(
+        {
+            "a": a,
+            "b": b,
+            "cat": cat,
+            "label": np.tile([1, 0], n // 2),
+            "sample_weight": np.ones(n),
+        }
     )
+    schema = _fit_schema(frame)
+    # 外层 schema：b 被相关性筛选剔除；OHE 含 validation_only。
+    assert "b" not in schema.numerical_columns
+    assert any("validation_only" in c for c in schema._encoded_columns)
+
+    # 内层训练折只有 cat_a 类别（不含 validation_only）。
+    fold_frame = frame.loc[cat == "cat_a"].reset_index(drop=True)
+    fold = FoldSafePreprocessor(schema).fit(fold_frame)
+    assert not any("validation_only" in c for c in fold.pp_._encoded_columns)
+
+    # 验证折出现 validation_only → handle_unknown 映射为全零，而非编码为 1。
+    val_frame = frame.loc[cat == "validation_only"].reset_index(drop=True)
+    out = fold.transform(val_frame)
+    cat_cols = [c for c in out.columns if c.startswith("cat_")]
+    assert cat_cols
+    assert np.allclose(out[cat_cols].to_numpy(), 0.0)
 
 
 def test_bayes_tuner_fold_safe_returns_bare_model():
@@ -94,7 +107,7 @@ def test_bayes_tuner_fold_safe_returns_bare_model():
 
     frame = _raw_frame()
     schema = _fit_schema(frame)
-    raw_columns = list(schema.numerical_columns) + list(schema.categorical_columns)
+    raw_columns = list(schema._all_numerical_columns) + list(schema._all_categorical_columns)
 
     raw_data = TrainingData(
         frame[raw_columns].reset_index(drop=True),

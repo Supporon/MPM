@@ -50,8 +50,6 @@ if _TORCH_AVAILABLE:
                 nn.AdaptiveAvgPool2d(1),
             )
             self.classifier = nn.Sequential(nn.Dropout(dropout), nn.Linear(128, 1))
-            # LUSI 谓词约束：可学习 τ（sigmoid(alpha)）
-            self.alpha = nn.Parameter(torch.tensor(0.0))
 
         def forward(self, x):
             h = self.features(x).flatten(1)
@@ -73,6 +71,7 @@ class Cnn2dClassifier(BaseEstimator, ClassifierMixin):
         learning_rate: float = 1e-3,
         weight_decay: float = 1e-4,
         dropout: float = 0.3,
+        tau: float = 1.0,
         random_state: int | None = None,
         device: str = "cpu",
     ):
@@ -82,6 +81,7 @@ class Cnn2dClassifier(BaseEstimator, ClassifierMixin):
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
         self.dropout = dropout
+        self.tau = float(tau)
         self.random_state = random_state
         self.device = device
 
@@ -175,12 +175,10 @@ class Cnn2dClassifier(BaseEstimator, ClassifierMixin):
                 logits = model(x)
                 if has_constraints:
                     pred = torch.sigmoid(logits)
-                    tau_hat = torch.sigmoid(model.alpha)
-                    tau = 1 - tau_hat
                     batch_w = sw[idx] if sw is not None else None
                     batch_phi = phi[idx]
                     loss = weighted_mse_with_predicate(
-                        pred, yt[idx], batch_phi, tau_hat, tau, sample_weight=batch_w
+                        pred, yt[idx], batch_phi, self.tau, sample_weight=batch_w
                     )["total"]
                 else:
                     # baseline 分支也使用样本权重，与谓词分支一致，避免配置的
@@ -239,7 +237,8 @@ class Cnn2dClassifier(BaseEstimator, ClassifierMixin):
         return {
             "patch": self.patch, "n_epochs": self.n_epochs, "batch_size": self.batch_size,
             "learning_rate": self.learning_rate, "weight_decay": self.weight_decay,
-            "dropout": self.dropout, "random_state": self.random_state, "device": self.device,
+            "dropout": self.dropout, "tau": self.tau,
+            "random_state": self.random_state, "device": self.device,
         }
 
     def set_params(self, **params):
@@ -295,6 +294,9 @@ class Cnn2dAdapter:
         dropout = float(params.get("dropout", 0.3))
         if not 0 <= dropout < 1:
             raise ValueError("cnn2d dropout must be in [0, 1)")
+        tau = float(params.get("tau", 1.0))
+        if tau < 0:
+            raise ValueError("cnn2d tau must be non-negative")
 
     def build(self, params: Mapping[str, Any], seed: int) -> Cnn2dClassifier:
         return Cnn2dClassifier(
@@ -304,6 +306,7 @@ class Cnn2dAdapter:
             learning_rate=float(params.get("learning_rate", 1e-3)),
             weight_decay=float(params.get("weight_decay", 1e-4)),
             dropout=float(params.get("dropout", 0.3)),
+            tau=float(params.get("tau", 1.0)),
             random_state=seed,
             device=str(params.get("device", "cpu")),
         )

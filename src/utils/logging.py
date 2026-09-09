@@ -87,3 +87,22 @@ def get_logger(name: str) -> logging.Logger:
     logging.Logger
     """
     return logging.getLogger(f"mpm.{name}")
+
+
+def close_logging() -> None:
+    """关闭并移除由 :func:`setup_logging` 管理的 handler，释放文件句柄。
+
+    实验结束（含失败路径）后应调用，否则 FileHandler 会持有输出目录下的
+    ``experiment.log`` 文件句柄，导致 Windows 下 TemporaryDirectory 清理时
+    出现 WinError 32（第 7 节日志生命周期问题）。同一 logger 的 handler 边界
+    已由 ``_managed_handlers`` 跟踪，这里只清理框架自身添加的 handler。
+    """
+    logger = logging.getLogger("mpm")
+    for handler in _managed_handlers:
+        logger.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:  # pragma: no cover - 关闭失败不阻断收尾
+            pass
+    _managed_handlers.clear()
+    _initialized.clear()

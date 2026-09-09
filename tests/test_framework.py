@@ -49,13 +49,13 @@ import numpy as np
 import pandas as pd
 
 
-def get_dist_line(xs, ys, line_files, distance_type):
+def get_dist_line(xs, ys, line_files, distance_type, input_crs=None):
     assert distance_type == "geodesic"
     assert len(line_files) == 14
     return pd.DataFrame({"distance": np.arange(len(xs), dtype=float)})
 
 
-def get_cat_data(xs, ys, polygon_files, field):
+def get_cat_data(xs, ys, polygon_files, field, input_crs=None):
     prefix = "met" if field == "MetFacies" else ("rock" if "RockUnits" in str(polygon_files) else "intrusion")
     return pd.DataFrame({prefix: ["unit"] * len(xs)})
 
@@ -81,12 +81,12 @@ def get_grid_grad_stat_features(xs, ys, path, buffer_shape, buffer_size):
 class FakeLegacyOperators:
     """外部 ``lib_mpm`` GIS 算子的确定性替代实现。"""
 
-    def get_dist_line(self, xs, ys, line_files, distance_type):
+    def get_dist_line(self, xs, ys, line_files, distance_type, input_crs=None):
         assert distance_type == "geodesic"
         assert len(line_files) == 14
         return pd.DataFrame({"distance": np.arange(len(xs), dtype=float)})
 
-    def get_cat_data(self, xs, ys, polygon_files, field):
+    def get_cat_data(self, xs, ys, polygon_files, field, input_crs=None):
         prefix = "met" if field == "MetFacies" else ("rock" if "RockUnits" in str(polygon_files) else "intrusion")
         return pd.DataFrame({prefix: ["unit"] * len(xs)})
 
@@ -1804,12 +1804,11 @@ class FrameworkTests(unittest.TestCase):
         pred = torch.tensor([0.0, 0.9, 0.0, 0.0])
         target = torch.zeros(4)
         phi = torch.ones(4)
-        tau_hat = torch.tensor(0.5)
-        tau = torch.tensor(0.5)
+        tau = 0.5  # 固定谓词项系数
 
-        unweighted = weighted_mse_with_predicate(pred, target, phi, tau_hat, tau)
+        unweighted = weighted_mse_with_predicate(pred, target, phi, tau)
         weighted = weighted_mse_with_predicate(
-            pred, target, phi, tau_hat, tau,
+            pred, target, phi, tau,
             sample_weight=torch.tensor([0.0, 10.0, 0.0, 0.0]),
         )
         self.assertAlmostEqual(unweighted["mse"].item(), 0.2025, places=5)

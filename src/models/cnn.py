@@ -72,8 +72,6 @@ if _TORCH_AVAILABLE:
                 nn.Dropout(dropout),
                 nn.Linear(fc_units, 1),
             )
-            # LUSI 谓词约束：可学习 τ（sigmoid(alpha)）
-            self.alpha = nn.Parameter(torch.tensor(0.0))
 
         def forward(self, x: "torch.Tensor") -> "torch.Tensor":
             x = x.unsqueeze(1)  # (B, 1, n_features)
@@ -95,6 +93,7 @@ class CnnClassifier(BaseEstimator, ClassifierMixin):
         kernel_size: int = 3,
         fc_units: int = 64,
         dropout: float = 0.3,
+        tau: float = 1.0,
         random_state: int | None = None,
         dataloader_seed: int | None = None,
         device: str = "cpu",
@@ -107,6 +106,7 @@ class CnnClassifier(BaseEstimator, ClassifierMixin):
         self.kernel_size = kernel_size
         self.fc_units = fc_units
         self.dropout = dropout
+        self.tau = float(tau)
         self.random_state = random_state
         self.dataloader_seed = dataloader_seed
         self.device = device
@@ -138,7 +138,7 @@ class CnnClassifier(BaseEstimator, ClassifierMixin):
 
         has_constraints = constraints is not None and ("phi_vector" in constraints or "phi_vectors" in constraints)
         if has_constraints:
-            log.info("Using predicate constraints for weighted MSE loss")
+            log.info("Using predicate constraints for weighted MSE loss (tau=%.4f)", self.tau)
         else:
             log.info("No predicate constraints, using standard BCEWithLogitsLoss")
 
@@ -155,6 +155,7 @@ class CnnClassifier(BaseEstimator, ClassifierMixin):
             self.model_, X, y, training_config,
             sample_weight=sample_weight,
             constraints=constraints,
+            tau=self.tau if has_constraints else 0.0,
             logger=log,
         )
         return self
@@ -185,6 +186,7 @@ class CnnClassifier(BaseEstimator, ClassifierMixin):
             "kernel_size": self.kernel_size,
             "fc_units": self.fc_units,
             "dropout": self.dropout,
+            "tau": self.tau,
             "random_state": self.random_state,
             "dataloader_seed": self.dataloader_seed,
             "device": self.device,
@@ -244,6 +246,9 @@ class CnnAdapter:
         dropout = float(params.get("dropout", 0.3))
         if not 0 <= dropout < 1:
             raise ValueError("cnn dropout must be in [0, 1)")
+        tau = float(params.get("tau", 1.0))
+        if tau < 0:
+            raise ValueError("cnn tau must be non-negative")
 
     def build(self, params: Mapping[str, Any], seed: int) -> CnnClassifier:
         return CnnClassifier(
@@ -255,6 +260,7 @@ class CnnAdapter:
             kernel_size=int(params.get("kernel_size", 3)),
             fc_units=int(params.get("fc_units", 64)),
             dropout=float(params.get("dropout", 0.3)),
+            tau=float(params.get("tau", 1.0)),
             random_state=seed,
             dataloader_seed=(
                 int(params["dataloader_seed"])
